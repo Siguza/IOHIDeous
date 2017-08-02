@@ -87,7 +87,7 @@ void heap_spray_init(size_t size)
 #endif
 }
 
-static io_iterator_t *payloads = NULL;
+static mach_port_t *payloads = NULL;
 static size_t num_payloads = 0;
 
 bool heap_init(size_t size)
