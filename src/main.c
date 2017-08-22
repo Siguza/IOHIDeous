@@ -301,7 +301,7 @@ int main(int argc, const char **argv)
     // which will be used in initialization and which we can trigger to cache the
     // shmem value by changing the display bounds of a virtual display.
     // Since the page size is 0x1000 and the minimum struct size to get out of zalloc
-    // is 3 pages ,there is only a 1/3 chance that we will get the offset right.
+    // is 3 pages, there is only a 1/3 chance that we will get the offset right.
     // We only know whether we did so after moving evg back, so if we failed we have to
     // re-spray the heap and start again, which, on average, takes an eternity.
 
