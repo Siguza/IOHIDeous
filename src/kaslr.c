@@ -1,4 +1,5 @@
 #include <errno.h>              // errno
+#include <sched.h>              // sched_yield
 #include <stdint.h>             // uint64_t
 #include <stdlib.h>             // malloc, free, qsort
 #include <string.h>             // strerror
@@ -116,6 +117,7 @@ uint64_t get_kernel_slide(void *kernel)
     {
         for(size_t i = 0; i < NUM_PROBE; ++i)
         {
+            sched_yield(); // reduce likelihood for preemption
             buf[i] = time_addr(text_base + off, mem, cachesize, cacheline);
         }
         qsort(buf, NUM_PROBE, sizeof(*buf), &numerical_compare);

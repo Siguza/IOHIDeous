@@ -1,3 +1,4 @@
+#include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -52,6 +53,7 @@ int main(void)
     {
         for(size_t j = 0; j < times; ++j)
         {
+            sched_yield();
             res[i * times + j] = time_page(addr);
         }
     }
@@ -81,6 +83,7 @@ int main(void)
         {
             for(size_t j = 0; j < times; ++j)
             {
+                sched_yield();
                 uint64_t cycles = time_page(addr + off);
                 //n = cycles < n ? cycles : n;
                 //n += cycles;
