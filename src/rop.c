@@ -12,10 +12,6 @@
 #define _ZTV8OSObject OSObject_vtab
 #define _ZNK8OSObject13taggedReleaseEPKv OSObject_taggedRelease
 #define _ZNK12OSSerializer9serializeEP11OSSerialize OSSerializer_serialize
-//#define _ZN18IOMemoryDescriptor11withAddressEPvyj IOMemoryDescriptor_withAddress
-//#define _ZN18IOMemoryDescriptor3mapEj IOMemoryDescriptor_map
-//#define _ZN11IOMemoryMap17getVirtualAddressEv IOMemoryMap_getVirtualAddress
-//#define _ZN23IOMultiMemoryDescriptor15withDescriptorsEPP18IOMemoryDescriptorjjb IOMultiMemoryDescriptor_withDescriptors
 
 #define STRINGIFY_EXPAND(s) #s
 
@@ -92,17 +88,11 @@ int rop_gadgets(rop_t *rop, void *k)
                 SYM(_ZTV8OSObject);
                 SYM(_ZNK8OSObject13taggedReleaseEPKv);
                 SYM(_ZNK12OSSerializer9serializeEP11OSSerialize);
-                //SYM(_ZN18IOMemoryDescriptor11withAddressEPvyj);
-                //SYM(_ZN18IOMemoryDescriptor3mapEj);
-                //SYM(_ZN11IOMemoryMap17getVirtualAddressEv);
-                //SYM(_ZN23IOMultiMemoryDescriptor15withDescriptorsEPP18IOMemoryDescriptorjjb);
                 SYM(kOSBooleanTrue);
                 SYM(current_proc);
                 SYM(proc_ucred);
                 SYM(posix_cred_get);
                 SYM(bzero);
-                //SYM(task_reference);
-                //SYM(convert_task_to_port);
                 SYM(vm_map_remap);
                 SYM(mach_vm_wire);
                 SYM(ipc_port_alloc_special);
@@ -123,17 +113,11 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(_ZTV8OSObject);
     ENSURE(_ZNK8OSObject13taggedReleaseEPKv);
     ENSURE(_ZNK12OSSerializer9serializeEP11OSSerialize);
-    //ENSURE(_ZN18IOMemoryDescriptor11withAddressEPvyj);
-    //ENSURE(_ZN18IOMemoryDescriptor3mapEj);
-    //ENSURE(_ZN11IOMemoryMap17getVirtualAddressEv);
-    //ENSURE(_ZN23IOMultiMemoryDescriptor15withDescriptorsEPP18IOMemoryDescriptorjjb);
     ENSURE(kOSBooleanTrue);
     ENSURE(current_proc);
     ENSURE(proc_ucred);
     ENSURE(posix_cred_get);
     ENSURE(bzero);
-    //ENSURE(task_reference);
-    //ENSURE(convert_task_to_port);
     ENSURE(vm_map_remap);
     ENSURE(mach_vm_wire);
     ENSURE(ipc_port_alloc_special);

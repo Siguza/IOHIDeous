@@ -9,17 +9,11 @@ typedef struct
     uint64_t OSObject_vtab;
     uint64_t OSObject_taggedRelease;
     uint64_t OSSerializer_serialize;
-    //uint64_t IOMemoryDescriptor_withAddress;
-    //uint64_t IOMemoryDescriptor_map;
-    //uint64_t IOMemoryMap_getVirtualAddress;
-    //uint64_t IOMultiMemoryDescriptor_withDescriptors;
     uint64_t kOSBooleanTrue;
     uint64_t current_proc;
     uint64_t proc_ucred;
     uint64_t posix_cred_get;
     uint64_t bzero;
-    //uint64_t task_reference;
-    //uint64_t convert_task_to_port;
     uint64_t vm_map_remap;
     uint64_t mach_vm_wire;
     uint64_t ipc_port_alloc_special;
