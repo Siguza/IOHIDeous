@@ -1,4 +1,4 @@
-_Siguza, 16. Sep 2017_
+_Siguza, 28. Sep 2017_
 
 # IOHIDeous
 
@@ -171,7 +171,7 @@ Next we'll look at the structure's size. Since it's exposed to userland, we can 
 
 On Sierra 10.12.6, that yields `0x5ae8` bytes. That's also quite a lot... in other words, we can slap one monster of a memory structure an entire two gigabytes back and forth through memory (that's what inspired the name "IOHIDeous").
 
-Now, we know neither where this structure resides, nor where anything else of the kernel lies in respect to it. What we _do_ know however is that it is allocated via an `IOBufferMemoryDescriptor`, which ultimately goes through `kalloc`. `kalloc` passes most allocations down to `zalloc`, however this one is too large. The biggest kalloc zone on macOS is `kalloc.8192`, i.e `0x2000` bytes (in comparison, on iOS this goes up to `kalloc.32768`) - anything above that limit will go to the `kalloc_map`, or if that one is full, straight to the `kernel_map`. The nice thing about that is that there is no freelist employed, and allocations simply take place in the lowest free address gap large enough for the requested allocation. And thanks to `WindowServer`, our shared memory will almost certainly have been allocated very early, i.e. at one of the lowest addresses possible. Looking at memory pages, this means that we know next to nothing about those lying in front of our shared memory, but for those after it we can pretty much say the further away they are, the less likely they are to have been allocated. The furthest we can reach is 2GB, and if we allocate more than 2GB, we are almost guaranteed to have allocated the memory at +2GB, if it hasn't been allocated by someone else already.
+Now, we know neither where this structure resides, nor where anything else of the kernel lies in respect to it. What we _do_ know however is that it is allocated via an `IOBufferMemoryDescriptor`, which ultimately goes through `kalloc`. `kalloc` passes most allocations down to `zalloc`, however this one is too large. The biggest kalloc zone on macOS is `kalloc.8192`, i.e `0x2000` bytes (in comparison, on iOS this goes up to `kalloc.32768`) - anything above that limit will go to the `kalloc_map`, or if that one is full, straight to the `kernel_map`. The nice thing about that is that there are no freelists employed there, and allocations simply take place in the lowest free address gap large enough for the requested allocation. And thanks to `WindowServer`, our shared memory will almost certainly have been allocated very early, i.e. at one of the lowest addresses possible. Looking at memory pages, this means that we know next to nothing about those lying in front of our shared memory, but for those after it we can pretty much say the further away they are, the less likely they are to have been allocated. The furthest we can reach with our bug is 2GB, and if we allocate more than 2GB, we are almost guaranteed to have allocated the memory at +2GB, if that exact bit hasn't happened to have been allocated by someone else already.
 
 So the general strategy is:
 
@@ -179,9 +179,52 @@ So the general strategy is:
 2. Offset `evg` by 2GB.
 3. Read or corrupt the structure we put at that offset.
 
-Now, it turns out allocating a full 2GB takes a lot of time, and the first ca. 256MB take very little while the latter couple hundred MB take more and more time. I have found that allocating 1GB and offsetting by 768MB takes only about 25% of the time of allocating a full 2GB and still works 90% of the time. I added both variants to [`src/config.h`](TODO), with 1GB being the default and >2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
+Now, it turns out allocating a full 2GB takes a lot of time - that is, the first ca. 256MB take very little while the latter couple hundred MB take more and more time. I have found that allocating 1GB and offsetting by 768MB takes only about 25% of the time of allocating a full 2GB and still works 95% of the time. I added both variants to [`src/config.h`](TODO), with 1GB being the default and >2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
 
 ### Reading and writing memory
+
+First of all, we have the general problem that we don't know whether offsetting `evg` by a certain amount places it at the beginning of the sprayed memory structure or somewhere in the middle. We do know that allocations start at page boundaries though (including our shared memory), are rounded up to a multiple of the page size, and must be bigger than `0x2000`. So if nothing else helps, we can spray objects of size `0x3000` and then there will be only three possible offsets: `x`, `x + 0x1000` and `x + 0x2000`. So if we can perform our read or write operation multiple times in sequence, we can just do it three times at all offsets, and if not we at least get a 1 in 3 chance of getting it right.
+
+Now, writing memory is quite easy, at least as much as 4 bytes are concerned. `IOHIDSystem::initShmem` takes a single argument `bool clean`, which is `false` if the memory has not been freshly allocated, and which is used as follows:
+
+    int oldFlags = 0;
+
+    // ...
+
+    if (!clean) {
+        oldFlags = ((EvGlobals *)((char *)shmem_addr + sizeof(EvOffsets)))->eventFlags;
+    }
+
+    // ...
+
+    evg->eventFlags = oldFlags;
+
+So writing 4 bytes is a simple as:
+
+1. Put our data in `eventFlags`.
+2. Offset `evg`.
+
+And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot read anything else than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle when rewriting pointers, as they threaten to lay waste to every structure in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation, so if special care is taken, this method can actually suffice.
+
+_This is implemented in [`src/exploit.c`](TODO)._
+
+For reading memory it is kind of a requirement that we don't destroy the target structure, and the same could prove very useful for writing memory still. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
+
+1. Make a lot of allocations on the kernel heap, using objects whose corruption has no negative consequence.
+2. Offset `evg`.
+3. Reallocate the object(s) intersecting `evg`.
+4. Perform some read or write operation (we'll get to that in a bit).
+
+Point 3 is a bit tricky to pull off, since there is no straightforward way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate all sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! Using `IOSurface`, we can allocate kernel memory of arbitrary size which we can then map into our address space. By default it isn't wired, but we can request that when allocating it by passing the `IOSurfacePrefetchPages` property. This is perfect for our cause, because it lets us do the following:
+
+1. Spray the heap with `IOSurface` buffers and map them all into our address space.
+2. Offset `evg`.
+3. Fill the `IOSurface` memory, every page with a different, identifiable value.
+4. Read memory (again, bear with me). Now we know exactly where `evg` lies, relative to the start of an `IOSurface` buffer.
+5. Reposition `evg` to a desired offset relative to the `IOSurface` buffer.
+6. Free the intersecting `IOSurface` buffer(s).
+7. Reallocate the memory with a useful data structure.
+8. Read or write memory.
 
 
 
