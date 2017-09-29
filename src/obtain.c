@@ -63,7 +63,7 @@ io_connect_t steal_from_windowserver(void)
 
     // Some ports seem to block indefinitely on send.
     // Use SIGALRM to set up a timer and abort after 100ms of waiting.
-    sig_t oldfunc = signal(SIGALRM, timeout);
+    sig_t oldfunc = signal(SIGALRM, &timeout);
 
     io_connect_t retval = MACH_PORT_NULL;
     for(size_t i = 0; i < namesCnt && !end; ++i)

