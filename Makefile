@@ -1,7 +1,8 @@
-TARGET = hid
-HELPER = helper
-SRCDIR = src
-MIGDIR = mig
+TARGET  = hid
+HELPER  = helper
+LEAK    = leak
+SRCDIR  = src
+MIGDIR  = mig
 OSFMK  ?= /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include
 CFLAGS ?= -O3 -Wall
 
@@ -24,8 +25,11 @@ $(MIGDIR)/iokitUser.c: | $(MIGDIR)
 $(MIGDIR):
 	mkdir $(MIGDIR)
 
+$(LEAK): src/$(LEAK)/main.c
+	$(CC) -o $@ $^ $(CFLAGS) -framework IOKit -framework CoreFoundation
+
 clean:
-	rm -f $(TARGET) $(SRCDIR)/$(HELPER)/$(HELPER) $(SRCDIR)/$(HELPER)/$(HELPER)_bin.c
+	rm -f $(TARGET) $(LEAK) $(SRCDIR)/$(HELPER)/$(HELPER) $(SRCDIR)/$(HELPER)/$(HELPER)_bin.c
 
 fullclean: clean
 	rm -rf $(MIGDIR)

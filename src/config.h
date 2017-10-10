@@ -29,12 +29,18 @@
 // a few seconds while the remaining 80% take half an hour or so.
 // Half of that is a good compromise between speed (1 min of spraying) and safety.
 // But if you wanna play it safe, then PLAY_IT_SAFE. ;)
+#if 0
+TODO: re-comment
 #ifdef PLAY_IT_SAFE /* not defined by default */
 #   define SPRAY_AMOUNT     0x90000000
 #   define OFFSET_AMOUNT    0x7f000000
 #else
 #   define SPRAY_AMOUNT     0x40000000
 #   define OFFSET_AMOUNT    0x30000000
+#endif
+#else
+#   define SPRAY_AMOUNT     0x20000000
+#   define OFFSET_AMOUNT    (int32_t)-0x2ce00000
 #endif
 
 #endif
