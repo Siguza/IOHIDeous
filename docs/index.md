@@ -8,21 +8,28 @@ _Siguza, 10. Oct 2017_
 
 This is the tale of a macOS-only vulnerability in IOHIDFamily that yields kernel r/w and can be exploited by any unprivileged user.
 
-IOHIDFamily has been notorious in the past for the many race conditions it contained, which ultimately lead to large parts of it being rewritten to make use of command gates, as well as large parts of it being made accessible only to processes with certain entitlements. I was originally looking through its source in the hope of finding a low-hanging fruit that would let me compromise an iOS kernel. I didn't know it then, but some parts of IOHIDFamily exist only on macOS - specifically `IOHIDSystem`, which contains the vulnerability discussed herein.
+IOHIDFamily has been notorious in the past for the many race conditions it contained, which ultimately lead to large parts of it being rewritten to make use of command gates, as well as large parts of it being locked down by means of entitlements. I was originally looking through its source in the hope of finding a low-hanging fruit that would let me compromise an iOS kernel. I didn't know it then, but some parts of IOHIDFamily exist only on macOS - specifically `IOHIDSystem`, which contains the vulnerability discussed herein.
+
+The exploit accompanying this write-up consists of three parts:
+
+-   `poc` (`make poc`)  
+    Targets all macOS versions, crashes the kernel to prove the existence of a memory corruption.
+-   `leak` (`make leak`)  
+    Targets High Sierra, just to prove that no separate KASLR leak is needed.
+-   `hid` (`make all`)  
+    Targets Sierra and High Sierra, achieves full kernel r/w and disables SIP to prove that the vulnerability can be exploited by any unprivileged user on all recent versions of macOS.
 
 Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [`iokit-utils`](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext](https://github.com/Siguza/hsp4) along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
 
 ## Technical background
 
-In order to understand the attack surface as well as the vulnerability, you need to know about the involved parts of IOHIDFamily.
-
-It starts with the [`IOHIDSystem`](TODO) class and the UserClients it offers. There are currently three of those:
+In order to understand the attack surface as well as the vulnerability, you need to know about the involved parts of IOHIDFamily. It starts with the [`IOHIDSystem`](TODO) class and the UserClients it offers. There are currently three of those:
 
 - `IOHIDUserClient`
 - `IOHIDParamUserClient`
 - `IOHIDEventSystemUserClient`
 
-(There used to be a fourth, `IOHIDStackShotUserClient`, but that has been commented out for a while now.) Like almost all IOUserClient in IOHIDFamily, `IOHIDEventSystemUserClient` requires an entitlement to be spawned (`com.apple.hid.system.user-access-service`), however the other two do not. `IOHIDParamUserClient` can actually be spawned by any unprivileged process, but of interest to us is `IOHIDUserClient`, arguably the most powerful of the three, which during normal system operation is held by `WindowServer`:
+(There used to be a fourth, `IOHIDStackShotUserClient`, but that has been commented out for a while now.) Like almost all UserClients in IOHIDFamily these days, `IOHIDEventSystemUserClient` requires an entitlement to be spawned (`com.apple.hid.system.user-access-service`), however the other two do not. `IOHIDParamUserClient` can actually be spawned by any unprivileged process, but of interest to us is `IOHIDUserClient`, arguably the most powerful of the three, which during normal system operation is held by `WindowServer`:
 
     bash$ ioprint -d IOHIDUserClient
     IOHIDUserClient(IOHIDUserClient): (os/kern) successful (0x0)
@@ -37,13 +44,13 @@ It starts with the [`IOHIDSystem`](TODO) class and the UserClients it offers. Th
     </dict>
     </plist>
 
-This is an important point because as it turns out, IOHIDSystem restricts the amount of any given `IOHIDUserClient` to one. This is specifically enforced by the `evOpenCalled` class variable, which is set to `true` when an `IOHIDUserClient` is spawned and to `false` again when it is closed. This variable is checked in `IOHIDSystem::evOpen`, which in turn is called from `IOHIDSystem::newUserClientGated`.
+This is an important point because as it turns out, IOHIDSystem restricts the amount of `IOHIDUserClient`s that can exist at the same time to one. This is specifically enforced by the `evOpenCalled` class variable, which is set to `true` when an `IOHIDUserClient` is spawned and to `false` again when it is closed. This variable is checked in `IOHIDSystem::evOpen`, which in turn is called from `IOHIDSystem::newUserClientGated` (i.e. we can't even race it).
 
 Bottom line, there can only be one `IOHIDUserClient` at any given moment, and chances are that when your code runs, `WindowServer` will be up and running with its UserClient already. So snatching that is not straightforward, but we'll get to that later. For now we're gonna look at what it actually uses that UserClient for.
 
 `IOHIDSystem`/`IOHIDUserClient` offer some shared memory for an event queue that `WindowServer` can map into its address space via `clientMemoryForType`. This memory is split into three parts packed after each other in this order:
 
--   The `EvOffsets` structure.
+-   The `EvOffsets` structure.  
     This structs holds information about where the other parts of the shared memory are located in respect to the beginning of the shared memory (so they're given as offsets). The definition is:
 
     ```c
@@ -53,14 +60,14 @@ Bottom line, there can only be one `IOHIDUserClient` at any given moment, and ch
     } EvOffsets;
     ```
 
--   The `EvGlobals` structure.
+-   The `EvGlobals` structure.  
     This is where the actual event queue resides, and this makes up 99% of the shared memory. I'll omit the lengthy declaration here, you can view it in [`IOHIDShared.h`](TODO) or see my annotated version in [`data/evg.c`](TODO).
--   Private driver memory.
+-   Private driver memory.  
     As far as I can see, this remains unused as has a size of 0 bytes.
 
 In `IOHIDSystem`, the extensively used `EvGlobals` address is assigned to an `evg` variable, and although unused, the address of the private driver memory is assigned to an `evs` variable.
 
-To initialise that memory, `IOHIDSystem` offers a `createShmem` function, which `IOHIDUserClient` implements as external method 0. Like pretty much any IOHIDFamily interface these days, `IOHIDSystem::createShmem` is neatly gated to prevent any concurrent access, and the actual implementation resides in `IOHIDSystem::createShmemGated`.
+To initialise that memory, `IOHIDSystem` offers a `createShmem` function, which `IOHIDUserClient` implements as external method 0. Like pretty much any IOHIDFamily interface these days, `IOHIDSystem::createShmem` is neatly gated to prevent any concurrent access, and the actual implementation resides in `IOHIDSystem::createShmemGated`.  
 That one merely performs a versioning check, allocates the memory if it hasn't been allocated before, and then calls `IOHIDSystem::initShmem` to clean/initialise the actual data structures.
 
 And that's where it gets interesting.
@@ -126,7 +133,7 @@ I did some more digging and found that `WindowServer` actually lets go of its Us
 
     launchctl reboot logout
 
-But can we go lower? Can we do this as any unprivileged user? TL;DR: Yes we can!
+But can we go lower? Can we do this as any unprivileged user? TL;DR: Yes we can!  
 First, we can try with some AppleScript trickery. `loginwindow` implements something called "AppleEventReallyLogOut" or "aevtrlgo" for short, which attempts to log the user out without a confirmation dialogue. For reasons of general insanity, `loginwindow` does not seem to verify where this event is coming from, so any unprivileged account such as, say, `nobody`, can get away with this:
 
     osascript -e 'tell application "loginwindow" to «event aevtrlgo»'
@@ -159,7 +166,7 @@ In conclusion:
 - In one thread, we just spam a value to `eop->evGlobalsOffset`.
 - In another thread, we call the initialisation routine until `evg->version == 0`.
 
-_This is implemented in [`src/exploit.c`](TODO)._
+_This is implemented in [`src/exploit.c`](TODO)._ <!-- TODO: poc -->
 
 ### Shmem basics
 
@@ -179,7 +186,60 @@ int main(void)
 }
 ```
 
-From Sierra 10.12 through High Sierra 10.13, that yields `0x5ae8`. That's also quite a lot... in other words, we can slap one monster of a memory structure an entire two gigabytes back and forth through memory (that's what inspired the name "IOHIDeous").
+From Sierra 10.12.0 through High Sierra 10.13.0, that yields `0x5ae8`. That's also quite a lot... in other words, we can slap one monster of a memory structure an entire two gigabytes back and forth through memory (that's what inspired the name "IOHIDeous").
+
+Now, a priori we know neither where this structure resides, nor where any other kernel memory lies in respect to it. So far we only know that it is allocated via an `IOBufferMemoryDescriptor`, which for `kIOMemoryKernelUserShared` goes through `iopa_alloc`, and subsequently maps the memory into the provided task, if any - in this case the `kernel_task`, so the mapping ends up on the `kernel_map`. Knowing its sharing type and (rounded) size, we can easily find it with `kmap`:
+
+    bash$ sudo kmap -e | fgrep 24K | fgrep 'mem tru'
+    ffffff8209855000-ffffff820985b000     [  24K] -rw-/-rwx [mem tru cp] 0000000000000000 [0 0 0 0 0] 00000031/823e0c11:<         4> 0,0 {         6,         6} (dynamic)
+
+Running this a couple of times on Sierra yields addresses like:
+
+    ffffff91ec867000
+    ffffff91f3ec2000
+    ffffff91f48f3000
+    ffffff91f6a2c000
+    ffffff91f828a000
+    ffffff91fc02a000
+    ffffff91fe160000
+    ffffff91fe6b3000
+    ffffff91ffc8a000
+    ffffff9209150000
+    ffffff92103a8000
+    ffffff9211be0000
+    ffffff9213141000
+    ffffff9215c04000
+    ffffff921a2ce000
+    ffffff921bf03000
+
+And on High Sierra:
+
+    ffffff8116089000
+    ffffff8119735000
+    ffffff812a681000
+    ffffff81ec925000
+    ffffff81efedd000
+    ffffff82005cd000
+    ffffff820383d000
+    ffffff8205531000
+    ffffff82096c0000
+
+Those look like an arbitrary locations on the heap, which doesn't give us much. In order to do further statistics, we need to know what we're looking for. It seems extremely unlikely that we can find some structure with a fixed offset from our shared memory, so our best bet is most likely to make a lot of allocations, which might give us a _chance_ of an allocated structure appearing at a fixed offset... so let's look at where allocations go. The prime kernel memory allocator used by virtually all of IOKit is `kalloc`. Allocations smaller or equal to two page sizes (`0x2000` on x86(_64), `0x8000` on arm(64)), are passed on to `zalloc` with a corresponding `kalloc.X` zone handle. Allocations larger than two page sizes to go the `kalloc_map` first, and if that becomes full, directly to the `kernel_map` (allocations _a lot_ larger than two page sizes go directly to the `kernel_map`, but that doesn't affect us here).  
+So we've got two possible targets: the `kalloc_map` and the `kernel_map`.
+
+We'll first look at the `kernel_map` - that is, the entire virtual address space of the kernel. Allocations can happen practically anywhere, but unless explicitly told not to, the `vm_map_*` functions (through which both `kalloc` and `IOMemoryDescriptor` go) always allocate at the lowest possible address. This doesn't just make it likely that allocations we make are placed next to each other, but also that our shared memory was mapped in the same manner, and that the further we offset from it, the more likely an address is to still be free (so we could spray there). On Sierra that translates quite nicely into practice, but on High Sierra I found this way barred by the fact that my own allocations would happen at `ffffff92...` addresses while the shared memory resided around `ffffff82...`. I tracked this back mainly to a 64GB large mapping between the two:
+
+    bash$ sudo kmap -e | fgrep '64G'
+    ffffff820c115000-ffffff920c355000     [  64G] -rw-/-rwx [map prv cp] ffffff820c115000 [0 0 0 0 0] 0000000e/82656611:<         2> 0,0 {         0,         0} VM compressor
+
+As is evident from its tag, this monster map belongs to the virtual memory compressor. It also exists on Sierra, but there our shared memory sits _sfter_ it, whereas on High Sierra it sits _before_ it. So, `kernel_map`: hot for Sierra, not for High Sierra.
+
+What about the `kalloc_map` then? This is a submap of the `kernel_map` with a fixed size, specifically a 32nd of the physical memory size (i.e. 32GB -> 1GB). On Sierra it is identifiable by that fact and the fact that it is a `map`, while on High Sierra it even got its own tag:
+
+    bash$ sudo kmap -e | fgrep 'Kalloc'
+    ffffff81bca61000-ffffff81dca61000     [ 512M] -rw-/-rwx [map prv cp] ffffff81bca61000 [0 0 0 0 0] 0000000d/66b19131:<         2> 0,0 {         0,         0} Kalloc
+
+
 
 <!-- TODO
 Now, we know neither where this structure resides, nor where anything else of the kernel lies in respect to it. What we _do_ know however is that it is allocated via an `IOBufferMemoryDescriptor`, which ultimately goes through `kalloc`. `kalloc` passes most allocations down to `zalloc`, however this one is too large. The biggest kalloc zone on macOS is `kalloc.8192`, i.e `0x2000` bytes (in comparison, on iOS this goes up to `kalloc.32768`) - anything above that limit will go to the `kalloc_map`, or if that one is full, straight to the `kernel_map`. The nice thing about that is that there are no freelists employed there, and allocations simply take place in the lowest free address gap large enough for the requested allocation. And thanks to `WindowServer`, our shared memory will almost certainly have been allocated very early, i.e. at one of the lowest addresses possible. Looking at memory pages, this means that we know next to nothing about those lying in front of our shared memory, but for those after it we can pretty much say the further away they are, the less likely they are to have been allocated. The furthest we can reach with our bug is 2GB, and if we allocate more than 2GB, we are almost guaranteed to have allocated the memory at +2GB, if that exact bit hasn't happened to have been allocated by someone else already.
