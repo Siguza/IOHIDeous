@@ -16,7 +16,7 @@ The exploit accompanying this write-up consists of three parts:
     Targets all macOS versions, crashes the kernel to prove the existence of a memory corruption.
 -   `leak` (`make leak`)  
     Targets High Sierra, just to prove that no separate KASLR leak is needed.
--   `hid` (`make all`)  
+-   `hid` (`make hid`)  
     Targets Sierra and High Sierra, achieves full kernel r/w and disables SIP to prove that the vulnerability can be exploited by any unprivileged user on all recent versions of macOS.
 
 Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [`iokit-utils`](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext](https://github.com/Siguza/hsp4) along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
@@ -149,7 +149,7 @@ So in order to maximise our success rate, we do the following:
 3. If the former failed, run `osascript -e 'tell application "loginwindow" to «event aevtrlgo»'`.
 4. Try spawning the desired UserClient repeatedly. Whether we succeeded in logging the user out doesn't matter at this point, we'll just wait for a manual logout/shutdown/reboot if not. So as long as the return value of `IOServiceOpen` is `kIOReturnBusy`, we keep looping.
 
-_This is implemented in [`src/obtain.c`](TODO) with some parts residing in [`src/main.c`](TODO)._
+_This is implemented in [`src/hid/obtain.c`](TODO) with some parts residing in [`src/hid/main.c`](TODO)._
 
 ### Triggering the bug
 
@@ -166,7 +166,7 @@ In conclusion:
 - In one thread, we just spam a value to `eop->evGlobalsOffset`.
 - In another thread, we call the initialisation routine until `evg->version == 0`.
 
-_This is implemented in [`src/exploit.c`](TODO)._ <!-- TODO: poc -->
+_This is implemented in [`src/hid/exploit.c`](TODO). A minimal standalone implementation also exists in [`src/poc/main.c`](TODO)._
 
 ### Shmem basics
 
@@ -250,7 +250,7 @@ So the general strategy is:
 2. Offset `evg` by 2GB.
 3. Read or corrupt the structure we put at that offset.
 
-Now, it turns out allocating a full 2GB takes a lot of time - that is, the first ca. 256MB take very little while the latter couple hundred MB take more and more time. I have found that allocating 1GB and offsetting by 768MB takes only about 25% of the time of allocating a full 2GB and still works 95% of the time. I added both variants to [`src/config.h`](TODO), with 1GB being the default and >2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
+Now, it turns out allocating a full 2GB takes a lot of time - that is, the first ca. 256MB take very little while the latter couple hundred MB take more and more time. I have found that allocating 1GB and offsetting by 768MB takes only about 25% of the time of allocating a full 2GB and still works 95% of the time. I added both variants to [`src/hid/config.h`](TODO), with 1GB being the default and >2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
 -->
 
 ### Reading and writing memory
@@ -280,7 +280,7 @@ So writing 4 bytes is a simple as:
 
 And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot copy anything else than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle when rewriting pointers, as they threaten to lay waste to all memory in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation and if special care is taken, this method can actually suffice.
 
-_This is implemented in [`src/exploit.c`](TODO)._
+_This is implemented in [`src/hid/exploit.c`](TODO)._
 
 For reading memory it is kind of a hard requirement though that we don't destroy the target structure, and the same could prove very useful for writing memory still. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
 

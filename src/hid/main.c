@@ -117,7 +117,7 @@ int main(int argc, const char **argv)
     else
     {
         ERR("Unrecognized argument: %s", argv[1]);
-        return 1;
+        return -1;
     }
 
     if(argc >= 3)
@@ -129,16 +129,16 @@ int main(int argc, const char **argv)
         else
         {
             ERR("Unrecognized argument: %s", argv[2]);
-            return 1;
+            return -1;
         }
     }
 
     // Persist across logouts and live longer before shutdowns
-    signal(SIGTERM, ignore);
-    signal(SIGHUP, ignore);
+    signal(SIGTERM, &ignore);
+    signal(SIGHUP, &ignore);
 
     // Initialization
-    int retval = 1;
+    int retval = -1;
     kern_return_t ret;
     uid_t orig_uid = getuid();
 
