@@ -63,12 +63,11 @@ Bottom line, there can only be one `IOHIDUserClient` at any given moment, and ch
 -   The `EvGlobals` structure.  
     This is where the actual event queue resides, and this makes up 99% of the shared memory. I'll omit the lengthy declaration here, you can view it in [`IOHIDShared.h`](TODO) or see my annotated version in [`data/evg.c`](TODO).
 -   Private driver memory.  
-    As far as I can see, this remains unused as has a size of 0 bytes.
+    As far as I can see, this remains unused and has a size of 0 bytes.
 
 In `IOHIDSystem`, the extensively used `EvGlobals` address is assigned to an `evg` variable, and although unused, the address of the private driver memory is assigned to an `evs` variable.
 
-To initialise that memory, `IOHIDSystem` offers a `createShmem` function, which `IOHIDUserClient` implements as external method 0. Like pretty much any IOHIDFamily interface these days, `IOHIDSystem::createShmem` is neatly gated to prevent any concurrent access, and the actual implementation resides in `IOHIDSystem::createShmemGated`.  
-That one merely performs a versioning check, allocates the memory if it hasn't been allocated before, and then calls `IOHIDSystem::initShmem` to clean/initialise the actual data structures.
+To initialise that memory, `IOHIDSystem` offers a `createShmem` function which `IOHIDUserClient` implements as external method 0. Like pretty much any IOHIDFamily interface these days, `IOHIDSystem::createShmem` is neatly gated to prevent any concurrent access, and the real implementation resides in `IOHIDSystem::createShmemGated`. On Sierra and earlier that function actually allocated the shared memory if necessary, but since High Sierra (or IOHIDFamily version 1035.1.4) that duty has been shifted to `IOHIDSystem::init`. Regardless, all code paths eventually end up at `IOHIDSystem::initShmem`, which is responsible for cleaning and initialising the actual data structures.
 
 And that's where it gets interesting.
 
@@ -99,7 +98,7 @@ evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
 evs = (void *)((char *)shmem_addr + eop->evShmemOffset);
 ```
 
-Can you spot it? What if I told you that this function can be called with the shared memory already being mapped in the calling task, and that `EvGlobals` is declared as `volatile`? :P
+Can you spot it? What if I told you that this function can be called with the shared memory already mapped in the calling task, and that `EvOffsets` is declared as `volatile`? :P
 
 The thing is that between this line:
 
@@ -115,7 +114,7 @@ evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
 
 The value of `eop->evGlobalsOffset` can change, which will then cause `evg` to point to somewhere other than intended.
 
-From looking [at the source](TODO), this vulnerability has been present ever since the kext's original release back in 2002.
+From looking [at the source](TODO), this vulnerability seems to have been present ever since the kext's original release back in 2002.
 
 ## Putting the exploit together
 
@@ -224,40 +223,66 @@ And on High Sierra:
     ffffff8205531000
     ffffff82096c0000
 
-Those look like an arbitrary locations on the heap, which doesn't give us much. In order to do further statistics, we need to know what we're looking for. It seems extremely unlikely that we can find some structure with a fixed offset from our shared memory, so our best bet is most likely to make a lot of allocations, which might give us a _chance_ of an allocated structure appearing at a fixed offset... so let's look at where allocations go. The prime kernel memory allocator used by virtually all of IOKit is `kalloc`. Allocations smaller or equal to two page sizes (`0x2000` on x86(_64), `0x8000` on arm(64)), are passed on to `zalloc` with a corresponding `kalloc.X` zone handle. Allocations larger than two page sizes to go the `kalloc_map` first, and if that becomes full, directly to the `kernel_map` (allocations _a lot_ larger than two page sizes go directly to the `kernel_map`, but that doesn't affect us here).  
+Those look like arbitrary locations on the heap, which doesn't give us much. In order to do further statistics, we need to know what we're looking for. It seems extremely unlikely that we can find some structure with a fixed offset from our shared memory, so our best bet is most likely to make a lot of allocations, which might give us a _chance_ of an allocated structure appearing at a fixed offset... so let's look at where allocations go. The prime kernel memory allocator used by virtually all of IOKit is `kalloc`. Allocations smaller or equal to two page sizes (`0x2000` on x86(_64), `0x8000` on arm(64)), are passed on to `zalloc` with a corresponding `kalloc.X` zone handle. Allocations larger than two page sizes to go the `kalloc_map` first, and if that becomes full, directly to the `kernel_map` (allocations _a lot_ larger than two page sizes go directly to the `kernel_map`, but that doesn't affect us here).  
 So we've got two possible targets: the `kalloc_map` and the `kernel_map`.
 
-We'll first look at the `kernel_map` - that is, the entire virtual address space of the kernel. Allocations can happen practically anywhere, but unless explicitly told not to, the `vm_map_*` functions (through which both `kalloc` and `IOMemoryDescriptor` go) always allocate at the lowest possible address. This doesn't just make it likely that allocations we make are placed next to each other, but also that our shared memory was mapped in the same manner, and that the further we offset from it, the more likely an address is to still be free (so we could spray there). On Sierra that translates quite nicely into practice, but on High Sierra I found this way barred by the fact that my own allocations would happen at `ffffff92...` addresses while the shared memory resided around `ffffff82...`. I tracked this back mainly to a 64GB large mapping between the two:
+We'll first look at the `kernel_map` - that is, the entire virtual address space of the kernel. Unlike the zalloc zones, maps employ no freelists, so allocations can happen practically anywhere. However, unless explicitly told not to, the `vm_map_*` functions (through which both `kalloc` and `IOMemoryDescriptor` go) always put an allocation in the lowest free address gap that is large enough. This doesn't just mean that it's likely that allocations we make are placed next to each other, but also that our shared memory was mapped in the same manner, and that the further we offset from it, the more likely an address is to still be free (so we could spray there). On Sierra that translates quite nicely into practice, but on High Sierra I found this way barred by the fact that my own allocations would happen at `ffffff92...` addresses while the shared memory resided around `ffffff82...`. I tracked this back mainly to a 64GB large mapping between the two:
 
     bash$ sudo kmap -e | fgrep '64G'
     ffffff820c115000-ffffff920c355000     [  64G] -rw-/-rwx [map prv cp] ffffff820c115000 [0 0 0 0 0] 0000000e/82656611:<         2> 0,0 {         0,         0} VM compressor
 
-As is evident from its tag, this monster map belongs to the virtual memory compressor. It also exists on Sierra, but there our shared memory sits _sfter_ it, whereas on High Sierra it sits _before_ it. So, `kernel_map`: hot for Sierra, not for High Sierra.
+As is evident from its tag, this monster map belongs to the virtual memory compressor. It also exists on Sierra, but there our shared memory sits _after_ it whereas on High Sierra it sits _before_ it. This is most likely the result of `IOHIDSystem` allocating the shared memory in `IOHIDSystem::init` now, which is called much earlier than `IOHIDSystem::createShmem` ever could be. So, `kernel_map`: hot for Sierra, not for High Sierra.
 
-What about the `kalloc_map` then? This is a submap of the `kernel_map` with a fixed size, specifically a 32nd of the physical memory size (i.e. 32GB -> 1GB). On Sierra it is identifiable by that fact and the fact that it is a `map`, while on High Sierra it even got its own tag:
+What about the `kalloc_map` then? This is a submap of the `kernel_map` with a fixed size, specifically a 32nd of the physical memory size (i.e. 16GB -> 512MB). On Sierra it is identifiable by its exact size and the fact that it is a `map`, while on High Sierra it even got its own tag:
 
     bash$ sudo kmap -e | fgrep 'Kalloc'
     ffffff81bca61000-ffffff81dca61000     [ 512M] -rw-/-rwx [map prv cp] ffffff81bca61000 [0 0 0 0 0] 0000000d/66b19131:<         2> 0,0 {         0,         0} Kalloc
 
+Now that address looks like it could well be in range of our shared memory! I've done a couple of probes across reboots, and have sorted them by the distance between the kalloc map and our shared memory, for memory sizes of 8GB and 16GB:
 
+    10.13 8G
+    shmem               kalloc start        kalloc end          start diff          end diff
+    ffffff812a681000    ffffff80f0cd4000    ffffff8100cd4000    00000000399ad000    00000000299ad000
+    ffffff8116089000    ffffff80dc695000    ffffff80ec695000    00000000399f4000    00000000299f4000
+    ffffff8119735000    ffffff80dfd24000    ffffff80efd24000    0000000039a11000    0000000029a11000
 
-<!-- TODO
-Now, we know neither where this structure resides, nor where anything else of the kernel lies in respect to it. What we _do_ know however is that it is allocated via an `IOBufferMemoryDescriptor`, which ultimately goes through `kalloc`. `kalloc` passes most allocations down to `zalloc`, however this one is too large. The biggest kalloc zone on macOS is `kalloc.8192`, i.e `0x2000` bytes (in comparison, on iOS this goes up to `kalloc.32768`) - anything above that limit will go to the `kalloc_map`, or if that one is full, straight to the `kernel_map`. The nice thing about that is that there are no freelists employed there, and allocations simply take place in the lowest free address gap large enough for the requested allocation. And thanks to `WindowServer`, our shared memory will almost certainly have been allocated very early, i.e. at one of the lowest addresses possible. Looking at memory pages, this means that we know next to nothing about those lying in front of our shared memory, but for those after it we can pretty much say the further away they are, the less likely they are to have been allocated. The furthest we can reach with our bug is 2GB, and if we allocate more than 2GB, we are almost guaranteed to have allocated the memory at +2GB, if that exact bit hasn't happened to have been allocated by someone else already.
+    10.13 16G
+    shmem               kalloc start        kalloc end          start diff          end diff
+    ffffff82096c0000    ffffff81bc97c000    ffffff81dc97c000    000000004cd44000    000000002cd44000
+    ffffff8205531000    ffffff81b87ec000    ffffff81d87ec000    000000004cd45000    000000002cd45000
+    ffffff82005cd000    ffffff81b37e5000    ffffff81d37e5000    000000004cde8000    000000002cde8000
+    ffffff81ec925000    ffffff819fb38000    ffffff81bfb38000    000000004cded000    000000002cded000
+    ffffff820383d000    ffffff81b6a48000    ffffff81d6a48000    000000004cdf5000    000000002cdf5000
+    ffffff81efedd000    ffffff81a30df000    ffffff81c30df000    000000004cdfe000    000000002cdfe000
 
-So the general strategy is:
+Nice, all differences are less than the 2GB we can offset! (Note that the kalloc addresses are lower than the shmem ones, so 1. the differences are negative and 2. we're really lucky to have our offset value `signed`. :P) I've done the same statistics on Sierra as well (see [`data/shmem.txt`](TODO)), but there all differences are larger than 64GB (as is to be expected). So on High Sierra we'll go for the `kalloc_map`.
 
-1. Make >2GB worth of allocations on the kernel heap.
-2. Offset `evg` by 2GB.
-3. Read or corrupt the structure we put at that offset.
+Now that we have our targets set, we can look at how to maximise the chance of landing in a structure sprayed by us. On both maps, allocations usually happen at the lowest possible address, so the higher an address, the less likely it should be to have been previously allocated, i.e. the more likely it should be to be allocated by us.
 
-Now, it turns out allocating a full 2GB takes a lot of time - that is, the first ca. 256MB take very little while the latter couple hundred MB take more and more time. I have found that allocating 1GB and offsetting by 768MB takes only about 25% of the time of allocating a full 2GB and still works 95% of the time. I added both variants to [`src/hid/config.h`](TODO), with 1GB being the default and >2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
--->
+So, for Sierra/the `kernel_map`:
+
+1. Fill the `kalloc_map`.
+2. Make >2GB worth of allocations on the `kernel_map`.
+3. Offset `evg` by 2GB.
+4. Read or corrupt the structure at that offset.
+
+And for High Sierra/the `kalloc_map`:
+
+1. Fill the `kalloc_map`.
+2. Offset `evg` by ca. `-0x30000000`.
+3. Read or corrupt the structure at that offset.
+
+Notes:
+
+- `sysctlbyname("hw.memsize")` returns the system memory size, from which the size of the `kalloc_map` can be derived. 
+- The value `-0x30000000` is a bit arbitrary. In order to land inside the `kalloc_map`, we need a negative offset that is larger than the biggest possible difference between the end of the `kalloc_map` and the beginning of our shared memory, but which is also smaller than the smallest possible difference between the _beginning_ of the `kalloc_map` and the beginning of our shared memory. Ideally it should also be as small as possible, so that we land closer to the end of the map. With biggest and smallest observed differences being `-0x2cdfe000` and `-0x399ad000`, I have chosen `-0x30000000` as a conservative guess. It is most likely possible to derive a more fitting value based on the actual memory size (which seems to affect the differences) by doing a lot more statistics, but I eventually grew tired of rebooting, and `-0x30000000` works just fine for me (you can change `KALLOC_OFFSET_AMOUNT` in [`src/hid/config.h`](TODO) if you like a different value better).
+- Making 2GB worth of allocations takes well over 10 minutes on my machine, which is longer than I like to wait. I have found that allocating just 768MB and offsetting by a little bit less than that still worked every time for me though. I have added both configurations to [`src/hid/config.h`](TODO) with the 768MB being the default, and the 2GB one being selectable through a `-DPLAY_IT_SAFE` compiler flag.
 
 ### Reading and writing memory
 
 First of all, we have the general problem that we don't know whether offsetting `evg` by a certain amount places it at the beginning of a sprayed memory structure or somewhere in the middle. We do know that allocations start at page boundaries though (including our shared memory), are rounded up to a multiple of the page size, and must be bigger than `0x2000`. But if nothing else helps, we can spray objects of size `0x3000` and then there will be only three possible offsets: `x`, `x + 0x1000` and `x + 0x2000`. So if we can perform our read or write operation multiple times in sequence, we can just do it three times at all offsets, and otherwise we at least get a 1 in 3 chance of getting it right.
 
-Now, writing memory is quite easy, at least as much as 4 bytes are concerned. `IOHIDSystem::initShmem` takes a single argument `bool clean`, which is `false` if the memory has not been freshly allocated, and which is used as follows:
+Now, writing memory is quite easy, at least as much as 4 bytes are concerned. `IOHIDSystem::initShmem` takes a single argument `bool clean`, which is `false` if the memory has previously existed already, and which is used as follows:
 
 ```c
 int oldFlags = 0;
@@ -278,13 +303,13 @@ So writing 4 bytes is a simple as:
 1. Put our data in `eventFlags`.
 2. Offset `evg`.
 
-And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot copy anything else than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle when rewriting pointers, as they threaten to lay waste to all memory in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation and if special care is taken, this method can actually suffice.
+And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot copy anything else than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle when rewriting pointers, as they threaten to lay waste to everything in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation and if special care is taken, this method can actually suffice. (Note that there is a call to `bzero` in `initShmem`, but that also uses `shmem_addr` as argument rather than `evg`, so no harm is done to any memory we offset to.)
 
 _This is implemented in [`src/hid/exploit.c`](TODO)._
 
-For reading memory it is kind of a hard requirement though that we don't destroy the target structure, and the same could prove very useful for writing memory still. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
+For reading memory it is kind of a fundamental requirement though that we don't destroy the target structure, and the same could prove very useful for writing memory still. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
 
-1. Make a lot of allocations on the kernel heap, using objects whose corruption has no bad consequence (e.g. buffers).
+1. Make a lot of kalloc allocations using objects whose corruption has no bad consequence (e.g. buffers).
 2. Offset `evg`.
 3. Reallocate the memory intersecting `evg` (possibly using different objects).
 4. Perform some read or write operation (we'll get to that in a bit).
