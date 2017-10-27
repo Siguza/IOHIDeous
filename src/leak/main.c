@@ -51,8 +51,7 @@ int main(void)
         kOSSerializeSymbol | 19,
         0x75534f49, 0x63616672, 0x6c6c4165, 0x6953636f, 0x657a, // "IOSurfaceAllocSize"
         kOSSerializeNumber | 32,
-        //0x16000,
-        0x2200000,
+        0x0,
         0x0,
 
         kOSSerializeSymbol | 23,
