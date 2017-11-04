@@ -40,7 +40,7 @@ int main(void)
     signal(SIGHUP, &ignore);
 
     io_service_t service = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOHIDSystem"));
-    LOG("service: %x", service);
+    LOG("IOHIDSystem: %x", service);
     if(!MACH_PORT_VALID(service)) return -1;
 
     r = system("/bin/launchctl reboot logout");
@@ -54,7 +54,7 @@ int main(void)
         ret = IOServiceOpen(service, self, kIOHIDServerConnectType, &client);
         usleep(10);
     } while(ret == kIOReturnBusy);
-    LOG("client: %x, %s", client, mach_error_string(ret));
+    LOG("IOHIDUserClient: %x, %s", client, mach_error_string(ret));
     if(ret != KERN_SUCCESS || !MACH_PORT_VALID(client)) return -1;
 
     mach_vm_address_t shmem_addr = 0;
