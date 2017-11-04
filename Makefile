@@ -26,8 +26,8 @@ $(MIGDIR)/iokitUser.c: | $(MIGDIR)
 $(MIGDIR):
 	mkdir $(MIGDIR)
 
-$(LEAK): $(SRCDIR)/$(LEAK)/*.c
-	$(CC) -o $@ $^ $(CFLAGS) -framework IOKit -framework CoreFoundation
+$(LEAK): $(SRCDIR)/$(LEAK)/*.c $(MIGDIR)/iokitUser.c
+	$(CC) -o $@ $^ $(CFLAGS) -DIOKIT=1 -framework IOKit -framework CoreFoundation -I$(MIGDIR)
 
 $(POC): $(SRCDIR)/$(POC)/*.c
 	$(CC) -o $@ $^ $(CFLAGS) -framework IOKit
