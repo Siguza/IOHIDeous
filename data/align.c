@@ -16,8 +16,8 @@ int main(int argc, const char **argv)
     size_t off = atoi(argv[1]) * sizeof(uint32_t);
     for(size_t i = 0x1000; i < 0x6000; i += 0x1000)
     {
-        size_t idx = (i - ((char*)&evg->lleq - (char*)evg)) / sizeof(NXEQElement);
-        NXEQElement *el = (NXEQElement*)((char*)&evg->lleq[idx] + off);
+        size_t idx = (i - ((uintptr_t)&evg->lleq - (uintptr_t)evg)) / sizeof(NXEQElement);
+        NXEQElement *el = (NXEQElement*)((uintptr_t)&evg->lleq[idx] + off);
         for(size_t j = 0; j < 2; ++j)
         {
             print(&el[j].next);
