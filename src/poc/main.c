@@ -13,7 +13,7 @@
 #define LOG(str, args...) do { printf(str "\n", ##args); } while(0)
 
 const uint64_t SHMEM_VERSION = kIOHIDCurrentShmemVersion;
-const uint64_t CREATE_SHMEM_METHOD_INDEX = 0;
+const uint64_t IOHID_CREATE_SHMEM = 0;
 
 static void ignore(int signo)
 {
@@ -68,7 +68,7 @@ int main(void)
 
     while(1)
     {
-        IOConnectCallScalarMethod(client, CREATE_SHMEM_METHOD_INDEX, &SHMEM_VERSION, 1, NULL, NULL);
+        IOConnectCallScalarMethod(client, IOHID_CREATE_SHMEM, &SHMEM_VERSION, 1, NULL, NULL);
     }
 
     return 0;
