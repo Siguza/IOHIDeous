@@ -182,7 +182,7 @@ int main(int argc, const char **argv)
     LOG("host: 0x%x", host);
 
     vm_size_t pagesize;
-    host_page_size(host, &pagesize);
+    _host_page_size(host, &pagesize);
     size_t rounded_size = pagesize * 3;
     LOG("Using struct size 0x%lx", rounded_size);
 
