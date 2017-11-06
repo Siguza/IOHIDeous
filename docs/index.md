@@ -75,7 +75,7 @@ And that's where it gets interesting.
 
 This is the beginning of `IOHIDSystem::initShmem`, which contains the vulnerability:
 
-```c
+```c++
 int  i;
 EvOffsets *eop;
 int oldFlags = 0;
@@ -102,13 +102,13 @@ Can you spot it? What if I told you that this function can be called with the sh
 
 The thing is that between this line:
 
-```c
+```c++
 eop->evGlobalsOffset = sizeof(EvOffsets);
 ```
 
 and this one:
 
-```c
+```c++
 evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
 ```
 
@@ -284,7 +284,7 @@ First of all, we have the general problem that we don't know whether offsetting 
 
 Now, writing memory is quite easy, at least as much as 4 bytes are concerned. `IOHIDSystem::initShmem` takes a single argument `bool clean`, which is `false` if the memory has previously existed already, and which is used as follows:
 
-```c
+```c++
 int oldFlags = 0;
 
 // ...
@@ -307,24 +307,81 @@ And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather
 
 _This is implemented in [`src/hid/exploit.c`](TODO)._
 
-For reading memory it is kind of a fundamental requirement though that we don't destroy the target structure, and the same could prove very useful for writing memory still. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
+For reading memory it is kind of a fundamental requirement though that we don't destroy the target structure, and the same could also still prove very useful for writing. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
 
 1. Make a lot of kalloc allocations using objects whose corruption has no bad consequence (e.g. buffers).
 2. Offset `evg`.
 3. Reallocate the memory intersecting `evg` (possibly using different objects).
 4. Perform some read or write operation (we'll get to that in a bit).
 
-Point 3 is a bit tricky to pull off, since there is no straightforward way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate _all_ sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! Using `IOSurface`, we can allocate kernel memory of arbitrary size which we can then map into our address space. <!-- By default it isn't wired, but we can request that when allocating it by passing the `IOSurfacePrefetchPages` property. This is perfect for our cause, because it lets us do the following: -->
+Point 3 is a bit tricky to pull off, since there is no straightforward way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate _all_ sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! The `IOSurface` API offers a way to "attach CF property list types to an IOSurface buffer" - more precisely, you can store arbitrarily many results of `OSUnserializeXML`, as well as read those back or delete them at any time. Seems like made for our cause! Using that, we can do the following:
 
-1. Spray the heap with `IOSurface` buffers and map them all into our address space.
-2. Offset `evg`.
-3. Fill the `IOSurface` memory, every page with a different, identifiable value.
-4. Read memory (again, bear with me). Now we know exactly where `evg` lies, relative to the start of an `IOSurface` buffer.
-5. Reposition `evg` to a desired offset relative to the `IOSurface` buffer.
-6. Free the intersecting `IOSurface` buffer(s).
+1. Allocate an `IOSurface`.
+2. Spray the heap by attaching lots of `OSString`s to the surface.
+3. Offset `evg`.
+4. Read back the stored strings.
+5. Detect where `evg` initialisation happened.
+6. Free the intersecting string(s).
 7. Reallocate the memory with a useful data structure.
-8. Read or write memory.
+8. Read from or write to that structure.
 
+> As a little excourse, two notes regarding the use of `OSString`:
+> 
+> 1. I would've used `OSData`, but it turns out that has been using `kmem_alloc(kernel_map)` rather than `kalloc` for allocations larger than one page for quite some time, which means that `OSData` buffers will never go to the `kalloc_map` anymore.
+> 2.  
 
+With that settled, let's look at how we can read and write memory after `evg` has been moved already.
+
+Writing is much simpler, so I'll do that first. We'll just use `eventFlags` again, since there's such a nice function for it:
+
+```c++
+void IOHIDSystem::updateEventFlagsGated(unsigned flags, OSObject * sender __unused)
+{
+    if(eventsOpen) {
+        evg->eventFlags = (evg->eventFlags & ~KEYBOARD_FLAGSMASK) | (flags & KEYBOARD_FLAGSMASK);
+        nanoseconds_to_absolutetime(0, &clickTime);
+    }
+}
+```
+
+Unlike most other functions, this one _isn't_ exported as an external method of any UserClient, but is handled in `setProperties`:
+
+```c++
+IOReturn IOHIDSystem::setProperties(OSObject * properties)
+{
+    OSDictionary *  dict;
+    IOReturn        ret = kIOReturnSuccess;
+  
+    dict = OSDynamicCast(OSDictionary, properties);
+    if(dict) {
+        // ...
+        OSNumber *modifiersValue = OSDynamicCast(OSNumber, dict->getObject(kIOHIDKeyboardGlobalModifiersKey));
+        if(modifiersValue) {
+            updateEventFlags(modifiersValue->unsigned32BitValue());
+            return ret;
+        }
+        // ...
+    }
+    // ...
+    return ret;
+}
+```
+
+`updateEventFlags` does some indirection through an event queue as well as a command gate, but ultimately arrives at `updateEventFlagsGated`, and `kIOHIDKeyboardGlobalModifiersKey` ist just the string `"HIDKeyboardGlobalModifiers"`, so that call is simple enough to do. One thing remains though, how much does that bitmasking in `updateEventFlagsGated` restrain us? `KEYBOARD_FLAGSMASK` is the OR-product of a lot of other constants:
+
+```c
+#define KEYBOARD_FLAGSMASK \
+        (NX_ALPHASHIFTMASK | NX_SHIFTMASK | NX_CONTROLMASK | NX_ALTERNATEMASK \
+        | NX_COMMANDMASK | NX_NUMERICPADMASK | NX_HELPMASK | NX_SECONDARYFNMASK\
+        | NX_DEVICELSHIFTKEYMASK | NX_DEVICERSHIFTKEYMASK | NX_DEVICELCMDKEYMASK \
+        | NX_ALPHASHIFT_STATELESS_MASK | NX_DEVICE_ALPHASHIFT_STATELESS_MASK \
+        | NX_DEVICERCMDKEYMASK | NX_DEVICELALTKEYMASK | NX_DEVICERALTKEYMASK \
+        | NX_DEVICELCTLKEYMASK | NX_DEVICERCTLKEYMASK)
+```
+
+I've created a separate program in [`data/flags.c`](TODO) to print that constant, which gave me a value of `0x01ff20ff`. That looks too restrictive to write arbitrary pointers or data, but considering the fact that `evg->eventFlags & ~KEYBOARD_FLAGSMASK` is retained, it might just be enough to modify something in a useful way.
+
+Now onto reading! This one is a fair bit trickier, since most places `evg` is read from, the result either stays in kernelland or is at most passed to an event queue, which is only accessible through an `IOHIDEventSystemUserClient`, which is itself only accessible to cosumers with the `com.apple.hid.system.user-access-service` entitlement (which we don't have). There's also some coupling with `IOGraphics` - under the right circumstances, `IOHIDSystem::evDispatch` can copy the upper 24 of each the `x` and `y` component of `evg->screenCursorFixed` to the shared memory of an `IOFramebuffer` that has previously been attached via `IOHIDUserClient::connectClient`, from where it can subsequently be retrieved through an `IOFramebufferSharedUserClient`. However, missing 8 bits from every 32-bit int read doesn't sound so good, and on top of that it seems extremely hard to trigger a call to `IOHIDSystem::evDispatch` under the right circumstances (particularly, the cursor has to be on the screen described by the `IOFramebuffer` in question in order for the transaction to happen), since all the really useful functions like `IOHIDSystem::extSetMouseLocation` are locked away behind MACF checks.  
+Luckily there is one more thing that reads and, as it happens, also writes to `evg`: `_cursorHelper`. <!-- TODO -->
 
 ### Leaking the kernel slide, the tedious way
