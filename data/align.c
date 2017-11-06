@@ -1,3 +1,4 @@
+// gcc -o align align.c -Wall -O3 -framework IOKit
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

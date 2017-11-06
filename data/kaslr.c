@@ -1,3 +1,4 @@
+// gcc -o kaslr kaslr.c -Wall -O3
 #include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
