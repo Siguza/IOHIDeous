@@ -321,9 +321,10 @@ Point 3 is a bit tricky to pull off, since there is no straightforward way of te
 3. Offset `evg`.
 4. Read back the stored strings.
 5. Detect where `evg` initialisation happened.
-6. Free the intersecting string(s).
-7. Reallocate the memory with a useful data structure.
-8. Read from or write to that structure.
+6. Possibly reposition `evg` for alignment.
+7. Free the intersecting string(s).
+8. Reallocate the memory with a useful data structure.
+9. Read from or write to that structure.
 
 > As a little excourse, two notes regarding the use of `OSString`:
 > 
@@ -381,7 +382,92 @@ IOReturn IOHIDSystem::setProperties(OSObject * properties)
 
 I've created a separate program in [`data/flags.c`](TODO) to print that constant, which gave me a value of `0x01ff20ff`. That looks too restrictive to write arbitrary pointers or data, but considering the fact that `evg->eventFlags & ~KEYBOARD_FLAGSMASK` is retained, it might just be enough to modify something in a useful way.
 
-Now onto reading! This one is a fair bit trickier, since most places `evg` is read from, the result either stays in kernelland or is at most passed to an event queue, which is only accessible through an `IOHIDEventSystemUserClient`, which is itself only accessible to cosumers with the `com.apple.hid.system.user-access-service` entitlement (which we don't have). There's also some coupling with `IOGraphics` - under the right circumstances, `IOHIDSystem::evDispatch` can copy the upper 24 of each the `x` and `y` component of `evg->screenCursorFixed` to the shared memory of an `IOFramebuffer` that has previously been attached via `IOHIDUserClient::connectClient`, from where it can subsequently be retrieved through an `IOFramebufferSharedUserClient`. However, missing 8 bits from every 32-bit int read doesn't sound so good, and on top of that it seems extremely hard to trigger a call to `IOHIDSystem::evDispatch` under the right circumstances (particularly, the cursor has to be on the screen described by the `IOFramebuffer` in question in order for the transaction to happen), since all the really useful functions like `IOHIDSystem::extSetMouseLocation` are locked away behind MACF checks.  
-Luckily there is one more thing that reads and, as it happens, also writes to `evg`: `_cursorHelper`. <!-- TODO -->
+Now onto reading! This one is a fair bit trickier because most code that reads from `evg` either doesn't export that data elsewhere (which makes sense, since the client should have access to it through shared memory already), or it is ridiculously hard to trigger. For example, a call to `evDispatch` can cause the upper 24 bits of each the `x` and `y` components of `evg->screenCursorFixed` to the shared memory of an `IOFramebuffer`, if the frame buffer has previously been attached via a call to `IOHIDUserClient::connectClient`. That shared memory is readily accessible to us through the `IOFramebufferSharedUserClient`, however in order for the values to actually be copied there, `evg->frame` (which we don't control) has to be between `0` and `3` (inclusive), the cursor has to be on the screen represented by the `IOFramebuffer`, and `evDispatch` actually has to be called. All in all, hardly ideal.
+
+But there is one more thing that reads from and, as it happens, also writes to `evg`: `_cursorHelper`. This instance of `IOHIDSystemCursorHelper` is used for both coordinate system arithmetic as well as conversion between the fields `evg->cursorLoc`, `evg->screenCursorFixed` and `evg->desktopCursorFixed`. What's important for us is that is has its own separate storage, so it can also act as a cache to some extent. If we can use that to read a value from `evg` at one time and write it back at another, we can copy small amounts of memory to the actual shared memory we have mapped in our task. Now, the "writing back" part is easy enough, if we just look at `IOHIDSystem::initShmem`:
+
+```c++
+evg->cursorLoc.x = _cursorHelper.desktopLocation().xValue().as32();
+evg->cursorLoc.y = _cursorHelper.desktopLocation().yValue().as32();
+evg->desktopCursorFixed.x = _cursorHelper.desktopLocation().xValue().asFixed24x8();
+evg->desktopCursorFixed.y = _cursorHelper.desktopLocation().yValue().asFixed24x8();
+evg->screenCursorFixed.x = _cursorHelper.getScreenLocation().xValue().asFixed24x8();
+evg->screenCursorFixed.y = _cursorHelper.getScreenLocation().yValue().asFixed24x8();
+```
+
+As for reading, we've got three candidates:
+
+-   `evg->screenCursorFixed` is only read to be sent to `IOFramebuffer`, otherwise it's only ever written, so it's useless to us.
+-   `evg->desktopCursorFixed` is only read from in `IOHIDSystem::_setCursorPosition` if `!(cursorCoupled || external)` (any externally triggered call will have `external = true`) and in `IOHIDSystem::resetCursor` if `evg->updateCursorPositionFromFixed` is true (which we don't control if `evg` is offset).
+-   `evg->cursorLoc`, at last, is actually useful: it is passed to `setCursorPosition`, where it is stored unchanged in `_cursorHelper`:
+    ```c++
+    void IOHIDSystem::setCursorPosition(IOGPoint * newLoc, bool external, OSObject * sender)
+    {
+        if(eventsOpen == true)
+        {
+            clock_get_uptime(&_cursorEventLast);
+            _cursorHelper.desktopLocationDelta().xValue() += (newLoc->x - _cursorHelper.desktopLocation().xValue());
+            _cursorHelper.desktopLocationDelta().yValue() += (newLoc->y - _cursorHelper.desktopLocation().yValue());
+            _cursorHelper.desktopLocation().fromIntFloor(newLoc->x, newLoc->y);
+            _setCursorPosition(external, false, sender);
+            _cursorMoveLast = _cursorEventLast;
+            scheduleNextPeriodicEvent();
+        }
+    }
+    ```
+
+Ok, so how can we reach this code path? `setCursorPosition` is called in two places: `unregisterScreenGated` and `setDisplayBoundsGated`. IOHIDSystem has a notion of virtual screens on which the cursor can be - there are methods to create and destroy such screens, and to set their bounds, all of which are exported as external methods of `IOHIDUserClient`, meaning they are readily accessible to us. So in order to read 4 bytes from a memory structure, we have to:
+
+1. Register a virtual screen.
+2. Allocate an `IOSurface`.
+3. Spray the heap by attaching lots of `OSString`s to the surface.
+4. Offset `evg`.
+5. Read back the stored strings.
+6. Detect where `evg` initialisation happened.
+7. Possibly reposition `evg` for alignment.
+8. Free the intersecting string(s).
+9. Reallocate the memory with a useful data structure.
+10. Update the bounds of our virtual screen.
+11. Re-initialise `evg`.
+12. Read the copied value off our shared memory.
+
+In addition to all that work, we have to take special care of something else: `evg->screenCursorFixed` and `evg->desktopCursorFixed`. Reading from `evg->cursorLoc` may cause these two fields to be written to. Specifically, `_setCursorPosition` will be called with `external = true`. First it will reach this point:
+
+```c++
+if(OSSpinLockTry(&evg->cursorSema) == 0) { // host using shmem
+    // try again later
+    return;
+}
+```
+
+So if `evg->cursorSema` falls on a non-zero value, `_setCursorPosition` will abort and we'll be safe. Otherwise however, we will arrive at the following block of code:
+
+```c++
+if ((_cursorHelper.desktopLocation().xValue().asFixed24x8() == evg->desktopCursorFixed.x) &&
+    (_cursorHelper.desktopLocation().yValue().asFixed24x8() == evg->desktopCursorFixed.y) &&
+    (proximityChange == 0) && (!_cursorHelper.desktopLocationDelta())) {
+    cursorMoved = false;    // mouse moved, but cursor didn't
+}
+else {
+    evg->cursorLoc.x = _cursorHelper.desktopLocation().xValue().as32();
+    evg->cursorLoc.y = _cursorHelper.desktopLocation().yValue().as32();
+    evg->desktopCursorFixed.x = _cursorHelper.desktopLocation().xValue().asFixed24x8();
+    evg->desktopCursorFixed.y = _cursorHelper.desktopLocation().yValue().asFixed24x8();
+    if (pinScreen >= 0) {
+        _cursorHelper.updateScreenLocation(screen[pinScreen].desktopBounds, screen[pinScreen].displayBounds);
+    }
+    else {
+        _cursorHelper.updateScreenLocation(NULL, NULL);
+    }
+    evg->screenCursorFixed.x = _cursorHelper.getScreenLocation().xValue().asFixed24x8();
+    evg->screenCursorFixed.y = _cursorHelper.getScreenLocation().yValue().asFixed24x8();
+
+    // ...
+}
+```
+
+The `if` block is very unlikely to be entered, since `_cursorHelper` has just been updated with the values from `evg->cursorLoc`, which are in my experience very unlikely to match those of `evg->desktopCursorFixed` (at least if they're useful in any way). If the `else` branch is entered, `evg->desktopCursorFixed` and `evg->screenCursorFixed` will be written to. This may or may not be a problem, and we may or may not even reach this point as per `evg->cursorSema`, all depending on the memory structure we're intersecting with.
+
+Sounds like fun! :P
 
 ### Leaking the kernel slide, the tedious way
