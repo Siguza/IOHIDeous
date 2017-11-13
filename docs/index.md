@@ -21,6 +21,8 @@ The exploit accompanying this write-up consists of three parts:
 
 Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [`iokit-utils`](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext](https://github.com/Siguza/hsp4) along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
 
+Also for any kind of questions or feedback, feel free to hit me up on [Twitter](https://twitter.com/s1guza) or via mail (`*@*.net` where `*` = `siguza`).
+
 ## Technical background
 
 In order to understand the attack surface as well as the vulnerability, you need to know about the involved parts of IOHIDFamily. It starts with the [`IOHIDSystem`](TODO) class and the UserClients it offers. There are currently three of those:
@@ -314,7 +316,7 @@ For reading memory it is kind of a fundamental requirement though that we don't 
 3. Reallocate the memory intersecting `evg` (possibly using different objects).
 4. Perform some read or write operation (we'll get to that in a bit).
 
-Point 3 is a bit tricky to pull off, since there is no straightforward way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate _all_ sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! The `IOSurface` API offers a way to "attach CF property list types to an IOSurface buffer" - more precisely, you can store arbitrarily many results of `OSUnserializeXML`, as well as read those back or delete them at any time. Seems like made for our cause! Using that, we can do the following:
+Point 3 is a bit tricky to pull off, since there is no straightforward way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate _all_ sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! The `IOSurface` API offers a way to "attach CF property list types to an IOSurface buffer" - more precisely, you can store arbitrarily many results of `OSUnserializeXML` in kernelland, as well as read those back or delete them at any time. Seems like made for our cause! Using that, we can do the following:
 
 1. Allocate an `IOSurface`.
 2. Spray the heap by attaching lots of `OSString`s to the surface.
@@ -326,10 +328,10 @@ Point 3 is a bit tricky to pull off, since there is no straightforward way of te
 8. Reallocate the memory with a useful data structure.
 9. Read from or write to that structure.
 
-> As a little excourse, two notes regarding the use of `OSString`:
+> Two notes regarding the use of `OSString`:
 > 
 > 1. I would've used `OSData`, but it turns out that has been using `kmem_alloc(kernel_map)` rather than `kalloc` for allocations larger than one page for quite some time, which means that `OSData` buffers will never go to the `kalloc_map` anymore.
-> 2.  
+> 2. The serialised format of an `OSString` does not contain a null terminator (unlike `OSSymbol`), however one is added when instantiating/unserialising it, thus to occupy `N` bytes, the serialised length has to be `N-1`.
 
 With that settled, let's look at how we can read and write memory after `evg` has been moved already.
 
@@ -368,7 +370,7 @@ IOReturn IOHIDSystem::setProperties(OSObject * properties)
 }
 ```
 
-`updateEventFlags` does some indirection through an event queue as well as a command gate, but ultimately arrives at `updateEventFlagsGated`, and `kIOHIDKeyboardGlobalModifiersKey` ist just the string `"HIDKeyboardGlobalModifiers"`, so that call is simple enough to do. One thing remains though, how much does that bitmasking in `updateEventFlagsGated` restrain us? `KEYBOARD_FLAGSMASK` is the OR-product of a lot of other constants:
+`updateEventFlags` does some indirection through an event queue as well as a command gate, but ultimately arrives at `updateEventFlagsGated`, and `kIOHIDKeyboardGlobalModifiersKey` is just the string `"HIDKeyboardGlobalModifiers"`, so that call is simple enough to do. One thing remains though, how much does that bitmasking in `updateEventFlagsGated` restrain us? `KEYBOARD_FLAGSMASK` is the OR-product of a lot of other constants:
 
 ```c
 #define KEYBOARD_FLAGSMASK \
@@ -429,7 +431,7 @@ Ok, so how can we reach this code path? `setCursorPosition` is called in two pla
 9. Reallocate the memory with a useful data structure.
 10. Update the bounds of our virtual screen.
 11. Re-initialise `evg`.
-12. Read the copied value off our shared memory.
+12. Read the copied value off shared memory.
 
 In addition to all that work, we have to take special care of something else: `evg->screenCursorFixed` and `evg->desktopCursorFixed`. Reading from `evg->cursorLoc` may cause these two fields to be written to. Specifically, `_setCursorPosition` will be called with `external = true`. First it will reach this point:
 
@@ -466,8 +468,37 @@ else {
 }
 ```
 
-The `if` block is very unlikely to be entered, since `_cursorHelper` has just been updated with the values from `evg->cursorLoc`, which are in my experience very unlikely to match those of `evg->desktopCursorFixed` (at least if they're useful in any way). If the `else` branch is entered, `evg->desktopCursorFixed` and `evg->screenCursorFixed` will be written to. This may or may not be a problem, and we may or may not even reach this point as per `evg->cursorSema`, all depending on the memory structure we're intersecting with.
+The `if` block is very unlikely to be entered since `_cursorHelper` has just been updated with the values from `evg->cursorLoc`, which are in my experience very unlikely to match those of `evg->desktopCursorFixed` (at least if they're useful in any way). If the `else` branch is entered, `evg->desktopCursorFixed` and `evg->screenCursorFixed` will be written to. This may or may not be a problem, and we may or may not even reach this point as per `evg->cursorSema`, all depending on the memory structure we're intersecting with.
 
 Sounds like fun! :P
 
 ### Leaking the kernel slide, the tedious way
+
+No matter what we wanna do to the kernel, at some point we're gonna have to defeat KASLR and learn the kernel slide. If we intend to run some ROP, we need that pretty early on even. So how do we get there?
+
+The prime candidates for revealing the kernel slide are usually pointers in some dynamically allocated structures, which point back to the main kernel binary, often to functions, strings, or C++ vtables. With out ability to read 4 bytes of memory off a choosable memory structure that sounds pretty easy, until you realise that virtually all of those structures are small enough to be handled by zalloc, i.e. we cannot get them to the `kalloc_map` or the `kernel_map`. In fact, I have yet to learn of any object that is or can be made large enough to not be handled by zalloc, and which contains any pointers to the main kernel binary whatsoever. If you know of one, please do hit me up!
+
+But let's not despair over that, and let's instead look at what structures we _can_ allocate into the `kalloc_map` or the `kernel_map`. Here's a list of the ones I know, quite possibly incomplete:
+
+-   Data buffers. Examples include `OSString` or some forms of `IOBufferMemoryDescriptor`.
+-   Pointer arrays. Examples are the "buffers" allocated by `OSArray` and `OSDictionary`.
+-   `struct ipc_kmsg`. The container within which mach messages are wrapped.
+
+So let's look at those. Data buffers contain exclusively user-supplied data, so reading from them is entirely useless, and with writing we could at most break some assumptions that were established through sanitisation earlier, but... meh. Pointer arrays contain exclusively pointers to dynamically allocated objects, so corrupting them might get us code execution if we know an address where we can put a fake object, and reading from them might just tell us where such an address might be once the object is freed. However, neither of those gets us any closer to the kernel slide. That leaves only kmsg's... and boy are kmsg's something! 
+
+So let's take a closer look at kmsg's and to that end, mach messages. When a client sends a mach message, it consists of a _header_ containing the size of the message, destination port, etc., and of a _body_. That body can contain "descriptors", which can be out-of-line memory, an out-of-line array of mach ports, or a single inline mach port. Body space not used up by descriptors is just copied 1:1. This gives us a byte buffer of arbitrary size containing both binary data as well as pointers!  
+When a message enters kernelland through the `mach_msg` trap, the kernel allocates one large designated buffer for it with an `ipc_kmsg` header, and copies it there. Then it resolves port names to pointers, translates descriptors, adds a trailer to it that contains information about the sender, and finally adds the kmsg to the message queue of the destination port. Now, the buffer holding the kmsg needs to be significantly bigger than the raw mach message, not only due to the kmsg header and the message trailer, but also due to the fact that the size of descriptors is different for 32- and 64-bit context, and that the function allocating the buffer has no idea whether there will be any descriptors at all, or where the message is coming from. It only knows the user-specified message size, so it makes the most protective assumptions, i.e. that small port descriptors will have to be translated to big ones, and that the entire message body consists of port descriptors. Currently that means for every 12 bytes of body size, the kernel allocates 16 bytes - that means we'll have to take special care of the size if we wanna fill a mach message into a hole we punched into the heap. Now, also due to variable size and because descriptors always precede any non-descriptor data sent in a message, mach messages are aligned to the _end_ of the kalloc'ed buffer rather than to the beginning, and the header is pulled backwards as needed when descriptors are translated. To that end, the `ipc_kmsg` header (which sits at the very beginning of the kalloc allocation btw) has a field `ikm_header`, which points to the header of the mach message.
+
+Knowing all that, how can we use that to our advantage now? Plain reading seems futile at this point, so is _writing_ gonna do us any good? Ian Beer has [previously exploited kmsg's][1] by taking advantage of the fact that the size field is the first member of an `ipc_kmsg` struct, leading to a heap overflow allowing both controlled reading and writing. Overflows are hardly gonna do us any good however, since we could've also just moved `evg` a couple of pages further. 
+
+### Leaking the kernel slide, the cheater's way
+
+## Conclusion
+
+### References
+
+- [Ian Beer - Exception-oriented exploitation on iOS][1]
+
+<!-- link references -->
+
+  [1]: https://googleprojectzero.blogspot.com/2017/04/exception-oriented-exploitation-on-ios.html
