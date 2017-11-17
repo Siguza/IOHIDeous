@@ -19,7 +19,7 @@ The exploit accompanying this write-up consists of three parts:
 -   `hid` (`make hid`)  
     Targets Sierra and High Sierra, achieves full kernel r/w and disables SIP to prove that the vulnerability can be exploited by any unprivileged user on all recent versions of macOS.
 
-Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [`iokit-utils`](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext](https://github.com/Siguza/hsp4) along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
+Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [`iokit-utils`](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext][hsp4] along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
 
 Also for any kind of questions or feedback, feel free to hit me up on [Twitter](https://twitter.com/s1guza) or via mail (`*@*.net` where `*` = `siguza`).
 
@@ -375,7 +375,7 @@ IOReturn IOHIDSystem::setProperties(OSObject * properties)
 ```c
 #define KEYBOARD_FLAGSMASK \
         (NX_ALPHASHIFTMASK | NX_SHIFTMASK | NX_CONTROLMASK | NX_ALTERNATEMASK \
-        | NX_COMMANDMASK | NX_NUMERICPADMASK | NX_HELPMASK | NX_SECONDARYFNMASK\
+        | NX_COMMANDMASK | NX_NUMERICPADMASK | NX_HELPMASK | NX_SECONDARYFNMASK \
         | NX_DEVICELSHIFTKEYMASK | NX_DEVICERSHIFTKEYMASK | NX_DEVICELCMDKEYMASK \
         | NX_ALPHASHIFT_STATELESS_MASK | NX_DEVICE_ALPHASHIFT_STATELESS_MASK \
         | NX_DEVICERCMDKEYMASK | NX_DEVICELALTKEYMASK | NX_DEVICERALTKEYMASK \
@@ -433,7 +433,9 @@ Ok, so how can we reach this code path? `setCursorPosition` is called in two pla
 11. Re-initialise `evg`.
 12. Read the copied value off shared memory.
 
-In addition to all that work, we have to take special care of something else: `evg->screenCursorFixed` and `evg->desktopCursorFixed`. Reading from `evg->cursorLoc` may cause these two fields to be written to. Specifically, `_setCursorPosition` will be called with `external = true`. First it will reach this point:
+**The cursor problem**
+
+In addition to all that work, we have to take special care of something else: `evg->screenCursorFixed` and `evg->desktopCursorFixed`. Reading from `evg->cursorLoc` may cause these two fields to be written to (that's what I'm calling the **cursor problem**). Specifically, `_setCursorPosition` will be called with `external = true`. First it will reach this point:
 
 ```c++
 if(OSSpinLockTry(&evg->cursorSema) == 0) { // host using shmem
@@ -487,9 +489,20 @@ But let's not despair over that, and let's instead look at what structures we _c
 So let's look at those. Data buffers contain exclusively user-supplied data, so reading from them is entirely useless, and with writing we could at most break some assumptions that were established through sanitisation earlier, but... meh. Pointer arrays contain exclusively pointers to dynamically allocated objects, so corrupting them might get us code execution if we know an address where we can put a fake object, and reading from them might just tell us where such an address might be once the object is freed. However, neither of those gets us any closer to the kernel slide. That leaves only kmsg's... and boy are kmsg's something! 
 
 So let's take a closer look at kmsg's and to that end, mach messages. When a client sends a mach message, it consists of a _header_ containing the size of the message, destination port, etc., and of a _body_. That body can contain "descriptors", which can be out-of-line memory, an out-of-line array of mach ports, or a single inline mach port. Body space not used up by descriptors is just copied 1:1. This gives us a byte buffer of arbitrary size containing both binary data as well as pointers!  
-When a message enters kernelland through the `mach_msg` trap, the kernel allocates one large designated buffer for it with an `ipc_kmsg` header, and copies it there. Then it resolves port names to pointers, translates descriptors, adds a trailer to it that contains information about the sender, and finally adds the kmsg to the message queue of the destination port. Now, the buffer holding the kmsg needs to be significantly bigger than the raw mach message, not only due to the kmsg header and the message trailer, but also due to the fact that the size of descriptors is different for 32- and 64-bit context, and that the function allocating the buffer has no idea whether there will be any descriptors at all, or where the message is coming from. It only knows the user-specified message size, so it makes the most protective assumptions, i.e. that small port descriptors will have to be translated to big ones, and that the entire message body consists of port descriptors. Currently that means for every 12 bytes of body size, the kernel allocates 16 bytes - that means we'll have to take special care of the size if we wanna fill a mach message into a hole we punched into the heap. Now, also due to variable size and because descriptors always precede any non-descriptor data sent in a message, mach messages are aligned to the _end_ of the kalloc'ed buffer rather than to the beginning, and the header is pulled backwards as needed when descriptors are translated. To that end, the `ipc_kmsg` header (which sits at the very beginning of the kalloc allocation btw) has a field `ikm_header`, which points to the header of the mach message.
+When a message enters kernelland through the `mach_msg` trap, the kernel allocates one large designated buffer for it with an `ipc_kmsg` header, and copies it there. Then it resolves port names to pointers, translates descriptors, adds a trailer to it that contains information about the sender, and finally adds the kmsg to the message queue of the destination port. Now, the buffer holding the kmsg needs to be significantly bigger than the raw mach message, not only due to the kmsg header and the message trailer, but also due to the fact that the size of descriptors is different for 32- and 64-bit context, and that the function allocating the buffer has no idea whether there will be any descriptors at all, or where the message is coming from. It only knows the user-specified message size, so it makes the most protective assumptions, i.e. that small descriptors will have to be translated to big ones, and that the entire message body consists of descriptors. Currently that means for every 12 bytes of body size, the kernel allocates 16 bytes - that means we'll have to take special care of the size if we wanna fill a mach message into a hole we punched into the heap. Now, also due to variable size and because descriptors always precede any non-descriptor data sent in a message, mach messages are aligned to the _end_ of the kalloc'ed buffer rather than to the beginning, and the header is pulled backwards as needed when descriptors are translated. To that end, the `ipc_kmsg` header (which sits at the very beginning of the kalloc allocation btw) has a field `ikm_header`, which points to the header of the mach message.
 
-Knowing all that, how can we use that to our advantage now? Plain reading seems futile at this point, so is _writing_ gonna do us any good? Ian Beer has [previously exploited kmsg's][1] by taking advantage of the fact that the size field is the first member of an `ipc_kmsg` struct, leading to a heap overflow allowing both controlled reading and writing. Overflows are hardly gonna do us any good however, since we could've also just moved `evg` a couple of pages further. 
+Knowing all that, how can we use that to our advantage now? Plain reading seems futile at this point, so is _writing_ gonna do us any good? Ian Beer has [previously exploited kmsg's][p0blog] by corrupting the `ikm_size` field of an `ipc_kmsg`, leading to a heap overflow allowing both controlled reading and writing. That requires appropriate objects to reside after the kmsg in memory however, which isn't the case for us (otherwise we'd just move `evg` a couple of pages further and mess with those).  
+What other values do we have? Most values are pointers whose corruption would require far-reaching construction of fake objects, and the few that are not are mostly just flat-out copied to userland. `ikm_header->msgh_size` is used for the size of the copy-out, but corrupting that would just yield another heap overflow. We could corrupt `ikm_header`, which would allow us to construct an entire custom mach message, however that would require us to have some valid ports pointers at the very least (which we could read off the original mach message one by one, but that's tedious). There is another, much nicer field though, which allows us to get basically the same result with much less effort: `msgh_descriptor_count`.  
+Targeting that, we can send a message with a byte buffer and no descriptors, then change `msgh_descriptor_count` from `0` to `1`, and suddenly on receiving the message, the beginning of our byte buffer will be interpreted as a descriptor! :D
+
+The details for this are really straightforward: `msgh_descriptor_count` is a 32-bit int, we've already looked at how to write 32 bits of memory after offsetting `evg`, and targeting the least significant bit fits nicely with our writing mask of `0x01ff20ff`.
+
+With that figured out, we can create and "send ourselves" anything that a descriptor can describe. The most straightforward choice to me seems a fake task port with a fake task struct, which will then allow us to read arbitrary memory via `pid_for_task`. This technique has previously been used by [Luca Todesco][qwerty] in the [Yalu102 jailbreak][yalu102], and subsequently by [tihmstar][tihm] and yours truly in [Phœnix][phoenix] and [PhœnixNonce][phnonce]. I consider it publicly known at this point, and hence won't go into details.  
+Now, in order to pull that off, we need an address at which we can put our fake port and task structs. On devices without SMAP, we could just put those in our process memory and do a dull userland dereference. We're not gonna do that though, since for one my MacBook (on which I was developing the exploit for the biggest part) is equipped with SMAP, and secondly because it's always nice to break one more security feature if you can. :P  
+Alright, so we need a _kernel_ address - but guess what, we already have one in our kmsg: `ikm_header`! Now, we can't use that _directly_ though since the entire kmsg will be deallocated once we receive it, but knowing the size of the message we've sent, we can use `ikm_header` to calculate the address of the kmsg header - and due to the very nature of our exploit, there happens to exist something at a known offset from that address: IOHIDSystem shared memory. So we just made 0x6000 bytes of directly writeable, kernel-adressable memory - for getting exploit data into the kernel, that's as nice as it gets!
+
+So, how does reading `ikm_header` work in detail? Being an address makes it 64 bits wide, which means that we'll have to read it in two steps. Since one reading operation resets `evg`, we'll need to do an entire cycle of deallocating the kmsg, filling the space with buffer memory, offsetting `evg` again, and allocating a new kmsg between the two readings. But if the new kmsg has the same size as the old one and is filled into the same heap hole, then `ikm_header` is gonna hold the same value, so that won't be a problem.  
+There is one more thing though: remember the **cursor problem**?
 
 ### Leaking the kernel slide, the cheater's way
 
@@ -497,8 +510,20 @@ Knowing all that, how can we use that to our advantage now? Plain reading seems 
 
 ### References
 
-- [Ian Beer - Exception-oriented exploitation on iOS][1]
+- Myself: [hsp4 kext][hsp4] (code and `kernel_task` problem discussion)
+- Ian Beer: [Exception-oriented exploitation on iOS][p0blog] (write-up)
+- Luca Todesco: [Yalu102 jailbreak][yalu102] (code)
+- Jonathan Levin: [Phœnix jailbreak][phoenix] (write-up)
+- tihmstar and myself: [PhœnixNonce][phnonce] (code)
+
+<!-- TODO: tpwn? -->
 
 <!-- link references -->
 
-  [1]: https://googleprojectzero.blogspot.com/2017/04/exception-oriented-exploitation-on-ios.html
+  [hsp4]: https://github.com/Siguza/hsp4
+  [p0blog]: https://googleprojectzero.blogspot.com/2017/04/exception-oriented-exploitation-on-ios.html
+  [yalu102]: https://github.com/kpwn/yalu102
+  [phoenix]: http://newosxbook.com/files/PhJB.pdf
+  [phnonce]: https://github.com/Siguza/PhoenixNonce
+  [qwerty]: https://twitter.com/qwertyoruiopz
+  [tihm]: https://twitter.com/tihmstar

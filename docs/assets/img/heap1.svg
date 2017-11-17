@@ -1,0 +1,82 @@
+<?xml version="1.0" ?>
+<svg viewBox="0 0 820 250" xmlns="http://www.w3.org/2000/svg">
+    <style>
+    text { font-family: Menlo, Consolas, 'DejaVu Sans Mono', monospace; font-size: 7px; }
+    text.desc { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10px; }
+    text.title { font-size: 15px; }
+    line, rect { stroke: #000; }
+    rect { width: 40px; height: 20px; fill: #CCC !important; }
+    rect.free { fill: #FFF !important; }
+    rect.read { fill: #3D3 !important; }
+    rect.write { fill: #E33 !important; }
+    rect.double { width: 80px; }
+    rect.quad { width: 160px; }
+    rect, line.dash { stroke-width: 1; }
+    line.dash { stroke-dasharray: 2, 2; }
+    g text { text-anchor: middle; }
+    </style>
+
+    <g transform="translate(10 10)">
+        <g transform="translate(0 0)">
+            <rect x="0"  y="0" />
+            <rect x="40" y="0" class="free" />
+            <rect x="80" y="0" class="double" />
+            <rect x="160" y="0" class="double" />
+            <rect x="240" y="0" class="double" />
+            <rect x="320" y="0" class="double" />
+            <rect x="400" y="0" class="double" />
+            <rect x="480" y="0" />
+            <rect x="520" y="0" />
+            <rect x="560" y="0" class="double" />
+            <rect x="640" y="0" class="quad" />
+        </g>
+        <g transform="translate(0 30)">
+            <text x="20" y="0">ikm_size</text>
+            <text x="60" y="0">(padding)</text>
+            <text x="120" y="0">ikm_next</text>
+            <text x="200" y="0">ikm_prev</text>
+            <text x="280" y="0">ikm_header</text>
+            <text x="360" y="0">ikm_prealloc</text>
+            <text x="440" y="0">ikm_voucher</text>
+            <text x="500" y="0">ikm_qos</text>
+            <text x="540" y="10">ikm_qos_override</text>
+            <text x="600" y="0">ikm_importance</text>
+            <text x="720" y="0">ikm_inheritance</text>
+        </g>
+    </g>
+
+    <g transform="translate(10 100)">
+        <g transform="translate(0 0)">
+            <rect x="0"  y="0" />
+            <rect x="40" y="0" />
+            <rect x="80" y="0" />
+            <rect x="120" y="0" />
+            <rect x="160" y="0" />
+            <rect x="200" y="0" class="read" />
+            <rect x="240" y="0" />
+            <rect x="280" y="0" class="double" />
+            <rect x="360" y="0" class="double" />
+            <rect x="440" y="0" />
+            <rect x="480" y="0" />
+            <rect x="520" y="0" />
+            <rect x="560" y="0" class="double write" />
+            <rect x="640" y="0" class="double write" />
+        </g>
+        <g transform="translate(0 30)">
+            <text x="20" y="0">cursorSema</text>
+            <text x="60" y="0">eNum</text>
+            <text x="100" y="0">buttons</text>
+            <text x="140" y="0">eventFlags</text>
+            <text x="180" y="10">VertRetraceClock</text>
+            <text x="220" y="0">cursorLoc</text>
+            <text x="260" y="0">frame</text>
+            <text x="320" y="0">workBounds</text>
+            <text x="400" y="0">mouseRect</text>
+            <text x="460" y="0">version</text>
+            <text x="500" y="10">structSize</text>
+            <text x="540" y="0">lastFrame</text>
+            <text x="600" y="0">screenCursorFixed</text>
+            <text x="680" y="0">desktopCursorFixed</text>
+        </g>
+    </g>
+</svg>
