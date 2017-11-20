@@ -1,34 +1,44 @@
 <?xml version="1.0" ?>
-<svg viewBox="0 0 820 250" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 830 220" xmlns="http://www.w3.org/2000/svg">
     <style>
     text { font-family: Menlo, Consolas, 'DejaVu Sans Mono', monospace; font-size: 7px; }
     text.desc { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10px; }
     text.title { font-size: 15px; }
+    g text, text.title { text-anchor: middle; }
     line, rect { stroke: #000; }
     rect { width: 40px; height: 20px; fill: #CCC !important; }
-    rect.free { fill: #FFF !important; }
-    rect.read { fill: #3D3 !important; }
-    rect.write { fill: #E33 !important; }
+    rect.bg { stroke-width: 0; fill: #FFF !important; width: 100%; height: 100%; }
+    rect.white { fill: #FFF !important; }
+    rect.red { fill: #E33 !important; }
+    rect.orange { fill: #F93 !important; }
+    rect.yellow { fill: #FF3 !important; }
+    rect.green { fill: #3E3 !important; }
+    rect.blue { fill: #6DF !important; }
     rect.double { width: 80px; }
     rect.quad { width: 160px; }
     rect, line.dash { stroke-width: 1; }
     line.dash { stroke-dasharray: 2, 2; }
-    g text { text-anchor: middle; }
     </style>
 
-    <g transform="translate(10 10)">
+    <rect x="0" y="0" class="bg" />
+
+    <text x="410" y="25" class="title desc">ipc_kmsg</text>
+
+    <g transform="translate(10 45)">
         <g transform="translate(0 0)">
             <rect x="0"  y="0" />
-            <rect x="40" y="0" class="free" />
+            <rect x="40" y="0" class="white" />
             <rect x="80" y="0" class="double" />
             <rect x="160" y="0" class="double" />
-            <rect x="240" y="0" class="double" />
+            <rect x="240" y="0" class="double blue" />
             <rect x="320" y="0" class="double" />
             <rect x="400" y="0" class="double" />
             <rect x="480" y="0" />
             <rect x="520" y="0" />
             <rect x="560" y="0" class="double" />
             <rect x="640" y="0" class="quad" />
+            <line x1="800" y1="0"  x2="810" y2="0"  class="dash" />
+            <line x1="800" y1="20" x2="810" y2="20" class="dash" />
         </g>
         <g transform="translate(0 30)">
             <text x="20" y="0">ikm_size</text>
@@ -45,22 +55,26 @@
         </g>
     </g>
 
-    <g transform="translate(10 100)">
+    <text x="410" y="145" class="title desc">EvGlobals</text>
+
+    <g transform="translate(50 165)">
         <g transform="translate(0 0)">
-            <rect x="0"  y="0" />
+            <rect x="0"  y="0" class="yellow" />
             <rect x="40" y="0" />
             <rect x="80" y="0" />
             <rect x="120" y="0" />
             <rect x="160" y="0" />
-            <rect x="200" y="0" class="read" />
+            <rect x="200" y="0" class="green" />
             <rect x="240" y="0" />
             <rect x="280" y="0" class="double" />
             <rect x="360" y="0" class="double" />
             <rect x="440" y="0" />
             <rect x="480" y="0" />
             <rect x="520" y="0" />
-            <rect x="560" y="0" class="double write" />
-            <rect x="640" y="0" class="double write" />
+            <rect x="560" y="0" class="double orange" />
+            <rect x="640" y="0" class="double orange" />
+            <line x1="720" y1="0"  x2="730" y2="0"  class="dash" />
+            <line x1="720" y1="20" x2="730" y2="20" class="dash" />
         </g>
         <g transform="translate(0 30)">
             <text x="20" y="0">cursorSema</text>

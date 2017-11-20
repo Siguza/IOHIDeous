@@ -502,7 +502,11 @@ Now, in order to pull that off, we need an address at which we can put our fake 
 Alright, so we need a _kernel_ address - but guess what, we already have one in our kmsg: `ikm_header`! Now, we can't use that _directly_ though since the entire kmsg will be deallocated once we receive it, but knowing the size of the message we've sent, we can use `ikm_header` to calculate the address of the kmsg header - and due to the very nature of our exploit, there happens to exist something at a known offset from that address: IOHIDSystem shared memory. So we just made 0x6000 bytes of directly writeable, kernel-adressable memory - for getting exploit data into the kernel, that's as nice as it gets!
 
 So, how does reading `ikm_header` work in detail? Being an address makes it 64 bits wide, which means that we'll have to read it in two steps. Since one reading operation resets `evg`, we'll need to do an entire cycle of deallocating the kmsg, filling the space with buffer memory, offsetting `evg` again, and allocating a new kmsg between the two readings. But if the new kmsg has the same size as the old one and is filled into the same heap hole, then `ikm_header` is gonna hold the same value, so that won't be a problem.  
-There is one more thing though: remember the **cursor problem**?
+There is one more thing though: remember the **cursor problem**? Let's first look at the first few members of the `ipc_kmsg` and `EvGlobals` structs:
+
+![heap diagram](assets/img/heap1.svg)
+
+
 
 ### Leaking the kernel slide, the cheater's way
 
