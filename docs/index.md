@@ -8,7 +8,7 @@ _Siguza, 10. Oct 2017_
 
 This is the tale of a macOS-only vulnerability in IOHIDFamily that yields kernel r/w and can be exploited by any unprivileged user.
 
-IOHIDFamily has been notorious in the past for the many race conditions it contained, which ultimately lead to large parts of it being rewritten to make use of command gates, as well as large parts of it being locked down by means of entitlements. I was originally looking through its source in the hope of finding a low-hanging fruit that would let me compromise an iOS kernel. I didn't know it then, but some parts of IOHIDFamily exist only on macOS - specifically `IOHIDSystem`, which contains the vulnerability discussed herein.
+IOHIDFamily has been notorious in the past for the many race conditions it contained, which ultimately lead to large parts of it being rewritten to make use of command gates, as well as large parts of it being locked down by means of entitlements. I was originally looking through its source in the hope of finding a low-hanging fruit that would let me compromise an iOS kernel, but what I didn't know it then is that some parts of IOHIDFamily exist only on macOS - specifically `IOHIDSystem`, which contains the vulnerability discussed herein.
 
 The exploit accompanying this write-up consists of three parts:
 
@@ -19,13 +19,13 @@ The exploit accompanying this write-up consists of three parts:
 -   `hid` (`make hid`)  
     Targets Sierra and High Sierra, achieves full kernel r/w and disables SIP to prove that the vulnerability can be exploited by any unprivileged user on all recent versions of macOS.
 
-Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [`iokit-utils`](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext][hsp4] along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
+Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [iokit-utils](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext][hsp4] along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
 
-Also for any kind of questions or feedback, feel free to hit me up on [Twitter](https://twitter.com/s1guza) or via mail (`*@*.net` where `*` = `siguza`).
+For any kind of questions or feedback, feel free to hit me up on [Twitter](https://twitter.com/s1guza) or via mail (`*@*.net` where `*` = `siguza`).
 
 ## Technical background
 
-In order to understand the attack surface as well as the vulnerability, you need to know about the involved parts of IOHIDFamily. It starts with the [`IOHIDSystem`](TODO) class and the UserClients it offers. There are currently three of those:
+In order to understand the attack surface as well as the vulnerability, you need to know about the involved parts of IOHIDFamily. It starts with the [`IOHIDSystem` class](TODO) and the UserClients it offers. There are currently three of those:
 
 - `IOHIDUserClient`
 - `IOHIDParamUserClient`
@@ -328,10 +328,10 @@ Point 3 is a bit tricky to pull off, since there is no straightforward way of te
 8. Reallocate the memory with a useful data structure.
 9. Read from or write to that structure.
 
-> Two notes regarding the use of `OSString`:
-> 
-> 1. I would've used `OSData`, but it turns out that has been using `kmem_alloc(kernel_map)` rather than `kalloc` for allocations larger than one page for quite some time, which means that `OSData` buffers will never go to the `kalloc_map` anymore.
-> 2. The serialised format of an `OSString` does not contain a null terminator (unlike `OSSymbol`), however one is added when instantiating/unserialising it, thus to occupy `N` bytes, the serialised length has to be `N-1`.
+Two notes regarding the use of `OSString`:
+
+1. I would've used `OSData`, but it turns out that has been using `kmem_alloc(kernel_map)` rather than `kalloc` for allocations larger than one page for quite some time, which means that `OSData` buffers will never go to the `kalloc_map` anymore.
+2. The serialised format of an `OSString` does not contain a null terminator (unlike `OSSymbol`), however one is added when instantiating/unserialising it, thus to occupy `N` bytes, the serialised length has to be `N-1`.
 
 With that settled, let's look at how we can read and write memory after `evg` has been moved already.
 
@@ -470,7 +470,7 @@ else {
 }
 ```
 
-The `if` block is very unlikely to be entered since `_cursorHelper` has just been updated with the values from `evg->cursorLoc`, which are in my experience very unlikely to match those of `evg->desktopCursorFixed` (at least if they're useful in any way). If the `else` branch is entered, `evg->desktopCursorFixed` and `evg->screenCursorFixed` will be written to. This may or may not be a problem, and we may or may not even reach this point as per `evg->cursorSema`, all depending on the memory structure we're intersecting with.
+The `if` block is very unlikely to be entered since `_cursorHelper` has just been updated with the values from `evg->cursorLoc`, which are in my experience very unlikely to match those of `evg->desktopCursorFixed` (at least if they're useful in any way). If the `else` branch is entered, `evg->desktopCursorFixed` and `evg->screenCursorFixed` will be written to. Basically if `evg->cursorSema == 0`, `evg->desktopCursorFixed` and `evg->screenCursorFixed` will be written to. This may or may not be a problem, depending on the memory structure we're intersecting with.
 
 Sounds like fun! :P
 
@@ -486,7 +486,7 @@ But let's not despair over that, and let's instead look at what structures we _c
 -   Pointer arrays. Examples are the "buffers" allocated by `OSArray` and `OSDictionary`.
 -   `struct ipc_kmsg`. The container within which mach messages are wrapped.
 
-So let's look at those. Data buffers contain exclusively user-supplied data, so reading from them is entirely useless, and with writing we could at most break some assumptions that were established through sanitisation earlier, but... meh. Pointer arrays contain exclusively pointers to dynamically allocated objects, so corrupting them might get us code execution if we know an address where we can put a fake object, and reading from them might just tell us where such an address might be once the object is freed. However, neither of those gets us any closer to the kernel slide. That leaves only kmsg's... and boy are kmsg's something! 
+Data buffers contain exclusively user-supplied data, so reading from them is entirely useless, and with writing we could at most break some assumptions that were established through sanitisation earlier, but... meh. Pointer arrays contain exclusively pointers to dynamically allocated objects, so corrupting them might get us code execution if we know an address where we can put a fake object, and reading from them might just tell us where such an address might be once the object is freed. However, neither of those gets us any closer to the kernel slide. That leaves only kmsg's... and boy are kmsg's something! 
 
 So let's take a closer look at kmsg's and to that end, mach messages. When a client sends a mach message, it consists of a _header_ containing the size of the message, destination port, etc., and of a _body_. That body can contain "descriptors", which can be out-of-line memory, an out-of-line array of mach ports, or a single inline mach port. Body space not used up by descriptors is just copied 1:1. This gives us a byte buffer of arbitrary size containing both binary data as well as pointers!  
 When a message enters kernelland through the `mach_msg` trap, the kernel allocates one large designated buffer for it with an `ipc_kmsg` header, and copies it there. Then it resolves port names to pointers, translates descriptors, adds a trailer to it that contains information about the sender, and finally adds the kmsg to the message queue of the destination port. Now, the buffer holding the kmsg needs to be significantly bigger than the raw mach message, not only due to the kmsg header and the message trailer, but also due to the fact that the size of descriptors is different for 32- and 64-bit context, and that the function allocating the buffer has no idea whether there will be any descriptors at all, or where the message is coming from. It only knows the user-specified message size, so it makes the most protective assumptions, i.e. that small descriptors will have to be translated to big ones, and that the entire message body consists of descriptors. Currently that means for every 12 bytes of body size, the kernel allocates 16 bytes - that means we'll have to take special care of the size if we wanna fill a mach message into a hole we punched into the heap. Now, also due to variable size and because descriptors always precede any non-descriptor data sent in a message, mach messages are aligned to the _end_ of the kalloc'ed buffer rather than to the beginning, and the header is pulled backwards as needed when descriptors are translated. To that end, the `ipc_kmsg` header (which sits at the very beginning of the kalloc allocation btw) has a field `ikm_header`, which points to the header of the mach message.
@@ -497,16 +497,209 @@ Targeting that, we can send a message with a byte buffer and no descriptors, the
 
 The details for this are really straightforward: `msgh_descriptor_count` is a 32-bit int, we've already looked at how to write 32 bits of memory after offsetting `evg`, and targeting the least significant bit fits nicely with our writing mask of `0x01ff20ff`.
 
-With that figured out, we can create and "send ourselves" anything that a descriptor can describe. The most straightforward choice to me seems a fake task port with a fake task struct, which will then allow us to read arbitrary memory via `pid_for_task`. This technique has previously been used by [Luca Todesco][qwerty] in the [Yalu102 jailbreak][yalu102], and subsequently by [tihmstar][tihm] and yours truly in [Phœnix][phoenix] and [PhœnixNonce][phnonce]. I consider it publicly known at this point, and hence won't go into details.  
+With that figured out, we can create and "send ourselves" anything that a descriptor can describe. The most straightforward choice to me seems a fake mach port with a fake task struct, which will then allow us to read arbitrary memory via `pid_for_task`. This technique has previously been used by [Luca Todesco][qwerty] in the [Yalu102 jailbreak][yalu102], and subsequently by [tihmstar][tihm] and yours truly in [Phœnix][phoenix] and [PhœnixNonce][phnonce].  
 Now, in order to pull that off, we need an address at which we can put our fake port and task structs. On devices without SMAP, we could just put those in our process memory and do a dull userland dereference. We're not gonna do that though, since for one my MacBook (on which I was developing the exploit for the biggest part) is equipped with SMAP, and secondly because it's always nice to break one more security feature if you can. :P  
-Alright, so we need a _kernel_ address - but guess what, we already have one in our kmsg: `ikm_header`! Now, we can't use that _directly_ though since the entire kmsg will be deallocated once we receive it, but knowing the size of the message we've sent, we can use `ikm_header` to calculate the address of the kmsg header - and due to the very nature of our exploit, there happens to exist something at a known offset from that address: IOHIDSystem shared memory. So we just made 0x6000 bytes of directly writeable, kernel-adressable memory - for getting exploit data into the kernel, that's as nice as it gets!
+Alright, so we need a _kernel_ address - but guess what, we already have one in our kmsg: `ikm_header`! Now, we can't use that _directly_ though since the entire kmsg will be deallocated once we receive it, but knowing the size of the message we've sent, we can use `ikm_header` to calculate the address of the kmsg header - and due to the very nature of our exploit, there happens to exist something at a known offset from that address: IOHIDSystem shared memory. So we just made `0x6000` bytes of directly writeable, kernel-adressable memory - for getting exploit data into the kernel, it can hardly get any nicer tha that!
 
 So, how does reading `ikm_header` work in detail? Being an address makes it 64 bits wide, which means that we'll have to read it in two steps. Since one reading operation resets `evg`, we'll need to do an entire cycle of deallocating the kmsg, filling the space with buffer memory, offsetting `evg` again, and allocating a new kmsg between the two readings. But if the new kmsg has the same size as the old one and is filled into the same heap hole, then `ikm_header` is gonna hold the same value, so that won't be a problem.  
-There is one more thing though: remember the **cursor problem**? Let's first look at the first few members of the `ipc_kmsg` and `EvGlobals` structs:
+There is one more thing though: remember the **cursor problem**? To find out how that affects us in this case, let's have a look at the first few members of the `ipc_kmsg` and `EvGlobals` structs:
 
-![heap diagram](assets/img/heap1.svg)
+![data structure visualisation](assets/img/1-structs.svg)
 
+When reading the top 32 bits of `ikm_header`, they overlay like this:
 
+![heap diagram](assets/img/2-overlay.svg)
+
+`evg->cursorSema` falls onto the bottom 32 bits of `ikm_next`, which is a pointer to another kmsg. Since that one will also have been allocated via `kalloc`, the lower 32 bits of the pointer are exceedingly unlikely to all be zero, so in this case we should be safe.  
+What about the bottom 32 bits of `ikm_header` then?
+
+![another heap diagram](assets/img/3-overlay.svg)
+
+Now `evg->cursorSema` falls onto the padding between `ikm_size` and `ikm_next`. I don't see that being zeroed anywhere so in theory it could be anything, however in practice I have only ever seen zeroes there (and even if that's not always the case, it remains a possibility). So when we perform our reading operation, `IOHIDSystem::_setCursorPosition` will run through and `evg->screenCursorFixed` and `evg->desktopCursorFixed` will be written to, which intersect with `ikm_importance` and `ikm_inheritance` (marked red in the diagram). That's bad. When we receive the kmsg and `mach_msg_receive_results` is called, it will invoke `ipc_importance_receive` which will lead us to this bit (assuming we don't have a voucher):
+
+```c
+if (IIE_NULL != kmsg->ikm_importance) {
+    ipc_importance_elem_t elem;
+
+    ipc_importance_lock();
+    elem = ipc_importance_kmsg_unlink(kmsg);
+#if IIE_REF_DEBUG
+    elem->iie_kmsg_refs_dropped++;
+#endif
+    ipc_importance_release_locked(elem);
+    /* importance unlocked */
+}
+```
+
+Remember, the values written to `evg->screenCursorFixed` and `evg->desktopCursorFixed` depend on the values previously read from `evg->cursorLoc`. Since we're reading a valid pointer, we will write non-zero values which means that `IIE_NULL != kmsg->ikm_importance` will hold true and the if block will be entered. That will then lead to a call to `ipc_importance_kmsg_unlink`, which is defined as follows:
+
+```c
+static ipc_importance_elem_t ipc_importance_kmsg_unlink(ipc_kmsg_t kmsg)
+{
+    ipc_importance_elem_t elem = kmsg->ikm_importance;
+
+    if (IIE_NULL != elem) {
+        ipc_importance_elem_t unlink_elem;
+
+        unlink_elem = (IIE_TYPE_INHERIT == IIE_TYPE(elem)) ?
+            (ipc_importance_elem_t)((ipc_importance_inherit_t)elem)->iii_to_task : 
+            elem;
+
+        queue_remove(&unlink_elem->iie_kmsgs, kmsg, ipc_kmsg_t, ikm_inheritance);
+        kmsg->ikm_importance = IIE_NULL;
+    }
+    return elem;
+}
+```
+
+To fully understand what happens to our corrupted fields, we need to look at two macros: `IIE_TYPE` and `queue_remove`:
+
+```c
+#define IIE_TYPE(e) ((e)->iie_bits & IIE_TYPE_MASK)
+```
+
+```c
+#define queue_remove(head, elt, type, field)            \
+MACRO_BEGIN                                             \
+    queue_entry_t __next, __prev;                       \
+                                                        \
+    __next = (elt)->field.next;                         \
+    __prev = (elt)->field.prev;                         \
+                                                        \
+    if ((head) == __next)                               \
+        (head)->prev = __prev;                          \
+    else                                                \
+        ((type)(void *)__next)->field.prev = __prev;    \
+                                                        \
+    if ((head) == __prev)                               \
+        (head)->next = __next;                          \
+    else                                                \
+        ((type)(void *)__prev)->field.next = __next;    \
+                                                        \
+    (elt)->field.next = NULL;                           \
+    (elt)->field.prev = NULL;                           \
+MACRO_END
+```
+
+So `ipc_importance_kmsg_unlink` will ultimately dereference all of `ikm_importance`, `ikm_inheritance.prev` and `ikm_inheritance.next`, which we corrupt. Due to the conversion between `cursorLoc` and `screenCursorFixed`/`desktopCursorFixed`, there is no way the values we write can be valid pointers again. So we have no choice but to somehow repair what we're breaking with reading before we can receive the kmsg, and the only tool we've got at our disposal to pull this off is `evg`. In order to determine what is and isn't possible, we first have to finalise our plan for how exactly we shape the heap.
+
+In my implementation, I'm first spraying `OSString`s of size `0x3000`. After offsetting `evg` and detecting where it lands, I punch a hole of size `0x30000` (i.e. just deallocate 16 strings) for the kmsg, but before doing so I create at lower addresses 16 other holes of size `0x2d000` (i.e. 15 strings). That way, any new allocations of `0x2d000` bytes or less will first fill up those holes before interfering with our plans, and any allocations bigger than `0x30000` bytes are too big for our kmsg hole and will leave us alone anyway.  
+Now, what does a kmsg size of `0x30000` bytes imply? Currently on High Sierra, the sizes of `struct ipc_kmsg`, `mach_msg_base_t` and `mach_msg_max_trailer_t` are `0x58`, `0x24` and `0x44` bytes respectively, and we've already seen that the kernel reserves 16 bytes for every 12 bytes of message body size. That means the body part of our kmsg will have to be `0x30000 - 0x58 - 0x24 - 0x44 = 0x2ff40` bytes, so the mach message we send will need a `0x2ff40 / 16 * 12 = 0x23f70` bytes body. Since we don't send any descriptors, that will actually lead to `0x2ff40 - 0x23f70 = 0xbfd0` bytes after the kmsg header being completely unused. That's good, because that lets us do whatever we want with `evg` around the kmsg header without the chance of corrupting anything after it. And due to our hole-punching, there will still be a string buffer of `0x3000` bytes right before it - not quite enough to buffer the full `0x5ae8` bytes of `evg`, but still a lot.
+
+Now, what can we _actually_ do with `evg` in terms of repairs? The easiest thing would be if we could just use `evg->eventFlags` to write zeroes. For that, we have to consider both initialisation and kernel usage of the values around `eventFlags`.
+
+![evg initialisation](assets/img/4-evg.svg)
+
+That looks rather bad. The fact that values so shortly before and after `eventFlags` are initialised to non-zero or unknown values means that when we write `0` four times, at leats one of those will be overwritten again. The next best approach (to me anyway) would seem to try and use `cursorSema` initialisation to zero out things - since it's at the very beginning of `evg` there will be no writes before it, so we could just continuously shift `evg` further down in memory until we're after the kmsg header. However if `cursorSema` is zero, the kernel may change it to a non-zero value at any given time. If that happens right before we move `evg` again, we leave a non-zero value and haven't repaired anything. There are some more fields in `evg` that are initialised to zero, most notably in `evg->lleq`, an array of `NXEQElement`s. As far as I can tell, no code in `IOHIDFamily` accesses that memory at all beyond initialisation, and it doesn't seem to be exported to anywhere in kernelland either. That puts kernel writes out of the way and just leaves initialisation:
+
+![lleq initialisation](assets/img/5-lleq.svg)
+
+Since we have an array of those, we can nicely use `lleq[1]` to zero things out while the last 64 bytes of `lleq[0]` will give us enough space to leave the rest of the header intact:
+
+![lleq zeroing](assets/img/6-zero.svg)
+
+(As is visible, it gives us _only just_ enough space, down to the bit!)  
+Using the `sema` and `event.type` fields to zero out, we need to perform three operations in total - two to undo the earlier corruption, and one more because the `next` field writes non-zero values again right before the memory we zero out. That will lead to a non-zero value being stored in `ikm_qos_override`, but that has no bad consequence. Note we _could_ also have used the last element of `lleq` instead, which gets its `next` field set to zero, but then we would've again had to make sure that we have `0x6000` bytes of mapped memory instead of just `0x3000`, and... meh.
+
+Anyway we can repair the kmsg now, and with that there's nothing standing between us and our fake mach port anymore! Well, except the actual fake port and it kobject, that is. Getting a usable definition of `struct ipc_port` to userland is a bit tedious and requires digging through a dozen headers, but here's the result (to be fair, I had done most of the work for Phœnix/PhœnixNonce already and merely had to update it - also, `kptr_t` is just typedef'ed as `uint64_t`):
+
+```c
+typedef struct {
+    uint32_t ip_bits;
+    uint32_t ip_references;
+    struct {
+        kptr_t data;
+        uint32_t type;
+        uint32_t pad;
+    } ip_lock; // spinlock
+    struct {
+        struct {
+            struct {
+                uint32_t flags;
+                uint32_t waitq_interlock;
+                uint64_t waitq_set_id;
+                uint64_t waitq_prepost_id;
+                struct {
+                    kptr_t next;
+                    kptr_t prev;
+                } waitq_queue;
+            } waitq;
+            kptr_t messages;
+            natural_t seqno;
+            natural_t receiver_name;
+            uint16_t msgcount;
+            uint16_t qlimit;
+            uint32_t pad;
+        } port;
+        kptr_t klist;
+    } ip_messages;
+    kptr_t ip_receiver;
+    kptr_t ip_kobject;
+    kptr_t ip_nsrequest;
+    kptr_t ip_pdrequest;
+    kptr_t ip_requests;
+    kptr_t ip_premsg;
+    uint64_t  ip_context;
+    natural_t ip_flags;
+    natural_t ip_mscount;
+    natural_t ip_srights;
+    natural_t ip_sorights;
+} kport_t;
+```
+
+With `struct task` I was much lazier, only defining what's necessary (except for `ip_lock`, which isn't actually needed):
+
+```c
+typedef struct
+{
+    struct {
+        kptr_t data;
+        uint32_t type;
+        uint32_t pad;
+    } ip_lock; // mutex
+    uint32_t ref_count;
+    uint8_t pad[OFF_TASK_BSD_INFO - 3 * sizeof(uint32_t) - sizeof(kptr_t)];
+    kptr_t bsd_info;
+} ktask_t;
+```
+
+`OFF_TASK_BSD_INFO` is the offset of the `bsd_info` field in the kernel's task struct, which can be grabbed from the disassembly of `get_bsdtask_info` (here `0x390`):
+
+```
+0xffffff80002bccd0      55             push rbp
+0xffffff80002bccd1      4889e5         mov rbp, rsp
+0xffffff80002bccd4      488b87900300.  mov rax, qword [rdi + 0x390] ; [0x390:8]=0x415441445f5f ; "__DATA"
+0xffffff80002bccdb      5d             pop rbp
+0xffffff80002bccdc      c3             ret
+```
+
+Now after moving `evg` for the last time, we can zero out the second and third page of our shared memory (I'm avoiding the first page just in case the kernel writes anything there), and initialise the two structures like this (where `shmem_addr` and `shmem_kern` and the userland and kernel addresses of the shared memory, respectively):
+
+```c
+kport_t *kport = (kport_t*)(shmem_addr +     pagesize);
+ktask_t *ktask = (ktask_t*)(shmem_addr + 2 * pagesize);
+
+kport->ip_bits = 0x80000002; // IO_BITS_ACTIVE | IOT_PORT | IKOT_TASK
+kport->ip_references = 100;
+kport->ip_lock.type = 0x26;
+kport->ip_messages.port.receiver_name = 1;
+kport->ip_messages.port.msgcount = MACH_PORT_QLIMIT_KERNEL;
+kport->ip_messages.port.qlimit   = MACH_PORT_QLIMIT_KERNEL;
+kport->ip_kobject = shmem_kern + 2 * pagesize;
+kport->ip_srights = 99;
+
+ktask->ref_count = 100;
+```
+
+The reference and right counts are just arbitrary numbers high enough to make sure no deallocation is attempted. The two `MACH_PORT_QLIMIT_KERNEL` are there to prevent any accidental message being sent to the port (by simulating a full message queue), which would attempt to dereference the pointer `ip_messages.klist.messages`, which we don't set. Anything else should be fairly straightforward. Now in order to read 4 bytes from an arbitrary kernel address, we merely need to set `bsd_info` to the address we want minus `0x10` bytes (because that's the offset the `pid` field has in `struct proc`) and call `pid_for_task` on it.
+
+At last, we've successfully turned very constrained read and write primitives into full arbitrary read. Now we just need something to read from - we're after the kernel slide, which we still don't know. We only know the addresses of our shared memory and of our kmsg hole. So it'd be nice if we could reuse that somehow to learn the slide. We already enumerated what structures we can allocate in such a place:
+
+-   Data buffers.
+-   Pointer arrays.
+-   `struct ipc_kmsg`.
+
+In the beginning, the problem with pointer arrays was that they would only ever contain pointers to objects allocated on the heap, where we couldn't follow with our constrained read primitive. With arbitrary read however, things are looking much better! If we allocate, say, an `OSArray`, read the pointer to the first object it contains, and from that address read the first 8 bytes, we get its vtable - which resides in `__CONST.__constdata`, and whose address thus reveals the kernel slide. Now we only have to allocate an OSArray large enough for its pointer buffer to reach `0x30000` bytes. One way of achieving this would be to actually allocate an array with 24'576 elements (we could use all `OSBoolean`s to go easy on memory), but we don't even have to. We can take advantage of the binary serialisation format, namely the fact that dicts, arrays and sets take and use a length specifier from userland. Effectively, we can set an `OSArray`'s size to `0x6000` (that is later multiplied by the size of a pointer) but then supply only one element.
 
 ### Leaking the kernel slide, the cheater's way
 

@@ -1,5 +1,5 @@
 <?xml version="1.0" ?>
-<svg viewBox="0 0 830 220" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 830 200" xmlns="http://www.w3.org/2000/svg">
     <style>
     text { font-family: Menlo, Consolas, 'DejaVu Sans Mono', monospace; font-size: 7px; }
     text.desc { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10px; }
@@ -22,9 +22,9 @@
 
     <rect x="0" y="0" class="bg" />
 
-    <text x="410" y="25" class="title desc">ipc_kmsg</text>
+    <text x="410" y="30" class="title desc">ipc_kmsg</text>
 
-    <g transform="translate(10 45)">
+    <g transform="translate(10 50)">
         <g transform="translate(0 0)">
             <rect x="0"  y="0" />
             <rect x="40" y="0" class="white" />
@@ -37,6 +37,7 @@
             <rect x="520" y="0" />
             <rect x="560" y="0" class="double" />
             <rect x="640" y="0" class="quad" />
+            <line x1="720" y1="0"  x2="720" y2="20" class="dash" />
             <line x1="800" y1="0"  x2="810" y2="0"  class="dash" />
             <line x1="800" y1="20" x2="810" y2="20" class="dash" />
         </g>
@@ -55,9 +56,9 @@
         </g>
     </g>
 
-    <text x="410" y="145" class="title desc">EvGlobals</text>
+    <text x="410" y="125" class="title desc">EvGlobals</text>
 
-    <g transform="translate(50 165)">
+    <g transform="translate(50 145)">
         <g transform="translate(0 0)">
             <rect x="0"  y="0" class="yellow" />
             <rect x="40" y="0" />
