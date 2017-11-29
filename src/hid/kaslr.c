@@ -10,6 +10,8 @@
 #include "config.h"             // PREFETCH_LIMIT
 #include "kaslr.h"
 
+#define NUM_PROBE 16
+
 uint64_t time_addr(uint64_t addr, uint8_t *mem, uint32_t cachesize, uint32_t cacheline);
 
 __asm__
@@ -103,7 +105,6 @@ uint64_t get_kernel_slide(void *kernel)
     uint64_t slide = -1;
 
     // Probe kernel mem
-#define NUM_PROBE 16
     uint64_t *buf = malloc(NUM_PROBE * sizeof(*buf));
     if(buf == NULL)
     {
