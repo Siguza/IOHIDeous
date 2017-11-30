@@ -598,7 +598,7 @@ Since we have an array of those, we can nicely use `lleq[1]` to zero things out 
 
 ![lleq zeroing](assets/img/6-zero.svg)
 
-(As is visible, it gives us _only just_ enough space, down to the bit!)  
+(As is visible, it gives us _only just_ enough space, down to the bit! As if we're blessed with luck or something. :D)  
 Using the `sema` and `event.type` fields to zero out, we need to perform three operations in total - two to undo the earlier corruption, and one more because the `next` field writes non-zero values again right before the memory we zero out. That will lead to a non-zero value being stored in `ikm_qos_override`, but that has no bad consequence. Note we _could_ also have used the last element of `lleq` instead, which gets its `next` field set to zero, but then we would've again had to make sure that we have `0x6000` bytes of mapped memory instead of just `0x3000`, and... meh.
 
 Anyway we can repair the kmsg now, and with that there's nothing standing between us and our fake mach port anymore! Well, except the actual fake port and it kobject, that is. Getting a usable definition of `struct ipc_port` to userland is a bit tedious and requires digging through a dozen headers, but here's the result (to be fair, I had done most of the work for Phœnix/PhœnixNonce already and merely had to update it - also, `kptr_t` is just typedef'ed as `uint64_t`):
@@ -668,7 +668,7 @@ typedef struct
 ```
 0xffffff80002bccd0      55             push rbp
 0xffffff80002bccd1      4889e5         mov rbp, rsp
-0xffffff80002bccd4      488b87900300.  mov rax, qword [rdi + 0x390] ; [0x390:8]=0x415441445f5f ; "__DATA"
+0xffffff80002bccd4      488b87900300.  mov rax, qword [rdi + 0x390]
 0xffffff80002bccdb      5d             pop rbp
 0xffffff80002bccdc      c3             ret
 ```
@@ -722,7 +722,7 @@ _This is implemented in [`src/leak/main.c`](TODO)._
 
 ### Leaking the kernel slide, the cheater's way
 
-The above is nice and all (and was actually super fun to piece together), but it has a slight drawback: it takes a significant amount of time to execute after getting the `IOHIDUserClient` port. In a real attack scenario, that would mean that if we run on a logout, the user would be confronted with a black screen for quite a bit longer than they'd expect, and if we run on a shutdown/reboot, we might even get killed before we get our work done (this depends on physical memory size, and is also less likely when targeting the `kalloc_map` but more likely with the `kernel_map`). On top of that, the above way was chronologically the last part of the exploit I wrote. For those reasons we're gonna look at another way to leak the kernel slide, one that can be executed independently of any other part of the exploit: hardware vulnerabilities!
+The above is nice and all (and was actually super fun to piece together), but it has a slight drawback: scanning all these `OSString`s to find out where `evg` landed takes a significant amount of time to execute, and that is after getting the `IOHIDUserClient` port. In a real attack scenario, that would mean that if we run on a logout, the user would be confronted with a black screen for quite a bit longer than they'd expect, and if we run on a shutdown/reboot, we might even get killed before we get our work done (this depends on physical memory size, and is also less likely when targeting the `kalloc_map` but more likely with the `kernel_map`). On top of that, the above way was chronologically the last part of the exploit I wrote. For those reasons we're gonna look at another way to leak the kernel slide, one that can be executed independently of any other part of the exploit: hardware vulnerabilities!
 
 Long story short, we're doing a prefetch cache timing attack [as devised by Gruss et al][prefetch]. I add nothing new to this technique, I merely wrote my own implementation of it. For those unfamiliar with how it works, the basic vulnerabilities lie in the x86 `prefetchtN` instructions (where `N` can be `1`, `2`, ...). Those were designed as hints to the CPU that the program requests data at some address to be loaded into a particular cache, but they have a few interesting properties:
 
@@ -1267,7 +1267,123 @@ Despite the authors of the paper stating that their attack works also in virtual
 
 ### Getting `rip` control
 
-Back to corrupting stuff on the heap with `evg`! Since we want stuff from here on out to work with both ways of leaking the kernel slide, we're gonna have to to assume that we're back to not knowing the kernel address of our shared memory and not being able to read kernel memory - the only thing we learned is the kernel slide. 
+Back to corrupting stuff on the heap with `evg`! Since we want stuff from here on out to work with both ways of leaking the kernel slide, we're gonna have to to assume that we're back to not knowing the kernel address of our shared memory and not being able to read kernel memory - the only thing we learned is the kernel slide. Now we're back for more, and we're here with a constraint: we want our exploit to run as fast a possible, i.e. fast enough that, on a shutdown, we'd be able to slip in between the user getting logged out and the kernel forcibly killing every last process alive.
+
+To that end we're gonna do one heap spray _before_ obtaining the `IOHIDUserClient` port, and then avoid any kind of bulk iteration (except final deallocation), including both "reading back" and reallocation. In regard to our `evg` capabilities, that eliminates all but the writing via `eventFlags` while offsetting, and that in turn requires that laying waste to the memory surrounding our target memory isn't fatal. Looking again at what we can allocate on the `kalloc_map`/`kernel_map` (data buffers, pointer buffers and kmsg's), the only thing that lets us do that is again a pointer buffer, ideally containing a single pointer surrounded by nothingness, such as e.g. demonstrated earlier with a large `OSArray` containing a single element (I'll call this an "inflated array"). This time we're gonna change two things though:
+
+-   We're gonna use `io_service_add_notification_ool` rather than `IOSurface` to call `OSUnserializeXML` and keep the result in the kernel, because that returns us a mach port whose destruction we can invoke with the `_kernelrpc_mach_port_deallocate_trap` mach trap, which means that we can deallocate our sprayed objects very fast, without even the need for a MIG message.
+-   Instead of just one inflated array, we're gonna cram lots of them into a single handle, so we can increase both allocation and deallocation efficiency, and decrease overhead of whatever `io_service_add_notification_ool` is actually supposed to do! Here we're limited to 4096 bytes of data we can feed to `OSUnserializeXML` (which is a property of the MIG message defined for `io_service_add_notification_ool`), but the binary representation of an inflated array is very short:
+
+    ```c
+    kOSSerializeArray | 0x3000,                             // 4 bytes for the array
+    kOSSerializeEndCollection | kOSSerializeBoolean | 1,    // and 4 bytes for its content
+    ```
+
+    If we take away 4 bytes each for the mandatory magic, dictionary tag, `OSSymbol` tag, `OSSymbol` contents and `OSArray` tag (which will contain our inflated arrays), we could max this out at 509 inflated arrays! Due to later involvements however, we're not gonna drive it that far and instead leave it at a nice 256, which is still more than enough.
+
+At that point the memory we're targeting with `evg` should have a lonely pointer to `kOSBooleanTrue` every `0x3000` bytes, and all zeroes in between which are never used by the kernel. The avid reader will notice that `0x3000` is less than the size of our shared memory, but using a size of `0x6000` wouldn't help either, because we don't know where exactly those pointers are anyway. We only know that they're at the beginning of a page-aligned buffer, but on x86 there's 3 pages in `0x3000`, which gets us back to `x`, `x + 0x1000` and `x + 0x2000` as possible locations. So even if we chose `0x6000` instead, we'd just have 6 possible locations now and trying all of them would put us over the adjacent block just the same. In order to fix that, we first have to work out some other parts of our exploit though, so let's just put it off until later.
+
+Now, we wanna corrupt a pointer, but to where? The only thing we have is the kernel slide, and whatever we change our pointer to, it's gonna have to look at least in parts like a valid OSObject. There wouldn't just be some user-writeable memory in the kernel's __DATA segment that we could use or something, right? Turns out, there is! In [`iokit/Kernel/IOHibernateIO.cpp`](TODO) there is defined a `static hibernate_statistics_t _hibernateStats`, where `hibernate_statistics_t` is defined as follows:
+
+```c
+struct hibernate_statistics_t
+{
+    uint64_t image1Size;
+    uint64_t imageSize;
+    uint32_t image1Pages;
+    uint32_t imagePages;
+    uint32_t booterStart;
+    uint32_t smcStart;
+    uint32_t booterDuration;
+    uint32_t booterConnectDisplayDuration;
+    uint32_t booterSplashDuration;
+    uint32_t booterDuration0;
+    uint32_t booterDuration1;
+    uint32_t booterDuration2;
+    uint32_t trampolineDuration;
+    uint32_t kernelImageReadDuration;
+
+    uint32_t graphicsReadyTime;
+    uint32_t wakeNotificationTime;
+    uint32_t lockScreenReadyTime;
+    uint32_t hidReadyTime;
+
+    uint32_t wakeCapability;
+    uint32_t resvA[15];
+};
+typedef struct hibernate_statistics_t hibernate_statistics_t;
+```
+
+And then, for reasons beyond my understanding, there exists this also in `IOHibernateIO.cpp`:
+
+```c++
+SYSCTL_UINT(_kern, OID_AUTO, hibernategraphicsready,
+            CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_ANYBODY,
+            &_hibernateStats.graphicsReadyTime, 0, "");
+SYSCTL_UINT(_kern, OID_AUTO, hibernatewakenotification,
+            CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_ANYBODY,
+            &_hibernateStats.wakeNotificationTime, 0, "");
+SYSCTL_UINT(_kern, OID_AUTO, hibernatelockscreenready,
+            CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_ANYBODY,
+            &_hibernateStats.lockScreenReadyTime, 0, "");
+SYSCTL_UINT(_kern, OID_AUTO, hibernatehidready,
+            CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_ANYBODY,
+            &_hibernateStats.hidReadyTime, 0, "");
+```
+
+Well if `CTLFLAG_RW | CTLFLAG_ANYBODY` isn't an interesting combination on a global variable! In human terms, this means any process as full read-write capabilities on the struct members `graphicsReadyTime`, `wakeNotificationTime`, `lockScreenReadyTime` and `hidReadyTime`, which, oh so conveniently, lie all next to each other!
+
+    bash$ sysctl kern.hibernategraphicsready
+    kern.hibernategraphicsready: 0
+    bash$ sysctl kern.hibernategraphicsready=123
+    kern.hibernategraphicsready: 0 -> 123
+    bash$ sysctl kern.hibernategraphicsready
+    kern.hibernategraphicsready: 123
+
+Note that, like our bug, the entire facility containing these sysctl's only exists on macOS, since hibernation is not a thing on mobile devices. Also, `_hibernateStats` is not exported to the kernel's symbol table, but obtaining it is easy enough, given that the first real statement in `hibernate_machine_init()` (which _is_ exported) is a call to `bzero` on `_hibernateStats`:
+
+```
+;-- _hibernate_machine_init:
+0xffffff8000867c40      55             push rbp
+0xffffff8000867c41      4889e5         mov rbp, rsp
+0xffffff8000867c44      4157           push r15
+0xffffff8000867c46      4156           push r14
+0xffffff8000867c48      4155           push r13
+0xffffff8000867c4a      4154           push r12
+0xffffff8000867c4c      53             push rbx
+0xffffff8000867c4d      4883ec78       sub rsp, 0x78
+0xffffff8000867c51      488d3d708f2a.  lea rdi, 0xffffff8000b10bc8
+0xffffff8000867c58      be90000000     mov esi, 0x90
+0xffffff8000867c5d      e8de748aff     call sym.___bzero
+```
+
+The address of `_hibernateStats` is pretty evidently `0xffffff8000b10bc8` in this case.
+
+So, we've just made 16 bytes of writeable kernel memory whose address we can derive. At this point, let's get back to the problem we put aside earlier, of how we fix the corruption of adjacent pointers when offsetting `evg`: the original pointer we're corrupting has the value `kOSBooleanTrue`, which is a location at the beginning of the `zone_map`. And the value we wanna rewrite it to is `&_hibernateStats`, which is somewhere in the kernel's `__DATA` segment. What's interesting about those two is that they aren't too far apart - the main kernel binary always resides somewhere between `0xffffff8000000000` and `0xffffff8020000000`, the `zone_map` starts at values usually lower than `0xffffff8040000000`, and since `kOSBooleanTrue` is allocated very early on, it's exceedingly likely to not be too far off from the beginning of the `zone_map`. Effectively, the addresses `kOSBooleanTrue` and `&_hibernateStats` will have the same values in their top 32 bits, namely `0xffffff80`! For us, that means we only have to rewrite the lower 32 bits, which reduces the memory we corrupt. So what memory _do_ we corrupt, exactly? We're dealing with entire page sizes, and the only thing `evg` has that far out is `lleq`. Now, I've created a tiny little program in [`data/align.c`](TODO) that models five pages (all but the first) each holding a pointer in the first 8 bytes, and simulates how the initialisation of `lleq` intersects with each of these pointers. It takes a single signed int as command line argument, which is the amount of 4-byte-blocks by which `evg` is to be shifted up or down. The output is displayed as a list of all addresses where `lleq` initialisation happens, which could possibly intersect with a pointer. If intersection does indeed occur, the specific address is coloured red. Example:
+
+    bash$ ./align 0
+    0x0fe0 0x0fe4 0x0fe8 0x0ff4 0x0ff8 0x0ffc 0x1040 0x1044 0x1048 0x1054 0x1058 0x105c
+    0x2000 0x2004 0x2008 0x2014 0x2018 0x201c 0x2060 0x2064 0x2068 0x2074 0x2078 0x207c
+    0x2fc0 0x2fc4 0x2fc8 0x2fd4 0x2fd8 0x2fdc 0x3020 0x3024 0x3028 0x3034 0x3038 0x303c
+    0x3fe0 0x3fe4 0x3fe8 0x3ff4 0x3ff8 0x3ffc 0x4040 0x4044 0x4048 0x4054 0x4058 0x405c
+    0x5000 0x5004 0x5008 0x5014 0x5018 0x501c 0x5060 0x5064 0x5068 0x5074 0x5078 0x507c
+
+Here the values `0x2000`, `0x2004`, `0x5000` and `0x5004` are red, telling us that both halves of the pointers on pages 3 and 6 would be corrupted entirely if we were to align `evg->cursorSema` to the start of page 1. If we wanted to know how it looks if we align `evg->eventFlags` to the start of page 1 (which is how we'd rewrite the lower 32 bits of `kOSBooleanTrue` to `&_hibernateStats`), we'd pass `-3` as argument since we'd shift `evg` 3 times the size of a `uint32_t` backwards:
+
+    bash$ ./align -3
+    0x0fd4 0x0fd8 0x0fdc 0x0fe8 0x0fec 0x0ff0 0x1034 0x1038 0x103c 0x1048 0x104c 0x1050
+    0x1ff4 0x1ff8 0x1ffc 0x2008 0x200c 0x2010 0x2054 0x2058 0x205c 0x2068 0x206c 0x2070
+    0x2fb4 0x2fb8 0x2fbc 0x2fc8 0x2fcc 0x2fd0 0x3014 0x3018 0x301c 0x3028 0x302c 0x3030
+    0x3fd4 0x3fd8 0x3fdc 0x3fe8 0x3fec 0x3ff0 0x4034 0x4038 0x403c 0x4048 0x404c 0x4050
+    0x4ff4 0x4ff8 0x4ffc 0x5008 0x500c 0x5010 0x5054 0x5058 0x505c 0x5068 0x506c 0x5070
+
+Presenting this in Markdown isn't quite so impressive due to the lack of colors, but if you run this yourself, you'll see that none of these values are red now! In other words, using `eventFlags` to rewrite the first 4 bytes of a page will leave the first 8 bytes on all following pages entirely intact! We really are blessed with immense luck today!
+
+Anyway, we can celebrate later. For now we need to come up with a way of turning our `_hibernateStats` memory into something useful. We have 16 bytes, which means exactly two pointers. Since our memory is gonna be interpreted as an `OSObject`, the first 8 bytes will need to function as vtable pointer, and then we could either use the remaining 8 bytes as data and try to find a pointer in one of the kernel's constant sections that points to some code doing something useful with that data, or we could forge the "fake vtable" in a way that the remaining 8 bytes are used as the pointer to the virtual function that is invoked on our object (which is going to be `->taggedRelease()` btw, when we deallocate everything).  
+The first method sounds rather hard to pull off, since the kernel is most likely only gonna contain pointers to actual functions (as opposed to useful ROP gadgets), and any virtual C++ function is out of the question anyway, since in valid `OSObjects`, bytes 9 to 12 are used for the object reference counter, which, if accessed, is only ever increased or decreased, and never exported or used in any other way.  
+The second method however gets us straight to one arbitrary gadget worth of execution, which doesn't sound so bad already.
+
+### Wreaking havoc
 
 
 

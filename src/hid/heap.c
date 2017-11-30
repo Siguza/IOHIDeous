@@ -12,7 +12,6 @@
 #include "iokit.h"              // yaay, MIG
 
 #include "common.h"             // ERR
-#include "config.h"             // SPRAY_AMOUNT
 #include "heap.h"
 
 enum
