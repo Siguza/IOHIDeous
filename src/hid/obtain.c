@@ -168,7 +168,7 @@ bool log_user_out(void)
         ret = system(OSASCRIPT_PATH " -e 'tell application \"loginwindow\" to «event aevtrlgo»'");
         if(ret == 0)
         {
-            // TODO: check if loginwindow exited
+            // XXX: maybe check if loginwindow exited?
         }
         if(ret != 0)
         {

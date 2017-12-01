@@ -1,5 +1,5 @@
 <?xml version="1.0" ?>
-<svg viewBox="0 0 830 200" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 830 90" xmlns="http://www.w3.org/2000/svg">
     <style>
     text { font-family: Menlo, Consolas, 'DejaVu Sans Mono', monospace; font-size: 7px; }
     text.desc { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10px; }
@@ -23,7 +23,7 @@
 
     <rect x="0" y="0" class="bg" />
 
-    <g transform="translate(10 10)">
+    <g transform="translate(10 15)">
         <g transform="translate(0 10)">
             <rect x="0"  y="0" />
             <rect x="40" y="0" class="white" />
@@ -54,7 +54,7 @@
         </g>
     </g>
 
-    <g transform="translate(50 40)">
+    <g transform="translate(50 45)">
         <g transform="translate(0 0)">
             <rect x="0"  y="0" class="yellow" />
             <rect x="40" y="0" />

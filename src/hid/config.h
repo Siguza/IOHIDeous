@@ -37,7 +37,9 @@
 
 // ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 
-// TODO: docu
+// This is the amount of time we give the kernel to deallocate a single
+// notification port before we assume it hit our ROP gadget and is spinning.
+// Given in microseconds.
 #define EXPLOIT_TIMEOUT 1000000 /* 1 second */
 
 #endif

