@@ -69,7 +69,7 @@ uint64_t get_kernel_slide(void *kernel)
         }
     }
     ERR("Failed to get unslid kernel base address from binary");
-    return -1;
+    return -2;
 
     found:;
     LOG("Unslid kernel base is 0x%016llx", text_base);
@@ -80,7 +80,7 @@ uint64_t get_kernel_slide(void *kernel)
     if(sysctl(ctrl, sizeof(ctrl) / sizeof(*ctrl), &cachesize, &size, NULL, 0) != 0)
     {
         ERR("sysctl(\"hw.l3cachesize\") failed: %s", strerror(errno));
-        return -1;
+        return -2;
     }
     LOG("L3 cache size: %u", cachesize);
 
@@ -90,7 +90,7 @@ uint64_t get_kernel_slide(void *kernel)
     if(sysctl(ctrl, sizeof(ctrl) / sizeof(*ctrl), &cacheline, &size, NULL, 0) != 0)
     {
         ERR("sysctl(\"hw.cachelinesize\") failed: %s", strerror(errno));
-        return -1;
+        return -2;
     }
     LOG("Cacheline size: %u", cacheline);
 
@@ -98,7 +98,7 @@ uint64_t get_kernel_slide(void *kernel)
     if(mem == NULL)
     {
         ERR("Failed to allocate cache eviction buffer: %s", strerror(errno));
-        return -1;
+        return -2;
     }
 
     LOG("Doing timings, this might take a bit (and requires radio silence)...");
@@ -109,6 +109,7 @@ uint64_t get_kernel_slide(void *kernel)
     if(buf == NULL)
     {
         ERR("Failed to allocate timings buffer: %s", strerror(errno));
+        slide = -2;
         goto cleanup;
     }
 

