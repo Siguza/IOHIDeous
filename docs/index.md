@@ -17,7 +17,7 @@ The exploit accompanying this write-up consists of three parts:
 -   `leak` (`make leak`)  
     Targets High Sierra, just to prove that no separate KASLR leak is needed.
 -   `hid` (`make hid`)  
-    Targets Sierra and High Sierra, achieves full kernel r/w and disables SIP to prove that the vulnerability can be exploited by any unprivileged user on all recent versions of macOS.
+    Targets Sierra and High Sierra (up to 10.13.1, see [README](https://github.com/Siguza/IOHIDeous/)), achieves full kernel r/w and disables SIP to prove that the vulnerability can be exploited by any unprivileged user on all recent versions of macOS.
 
 Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [iokit-utils](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext][hsp4] along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
 
@@ -63,7 +63,7 @@ Bottom line, there can only be one `IOHIDUserClient` at any given moment, and ch
     ```
 
 -   The `EvGlobals` structure.  
-    This is where the event queue and cursor data reside, and this makes up 99% of the shared memory. I'll omit the lengthy declaration here, you can view it in [`IOHIDShared.h`](https://opensource.apple.com/source/IOHIDFamily/IOHIDFamily-1035.1.4/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h.auto.html) or see my annotated version in [`data/evg.c`](../data/evg.c).
+    This is where the event queue and cursor data reside, and this makes up 99% of the shared memory. I'll omit the lengthy declaration here, you can view it in [`IOHIDShared.h`](https://opensource.apple.com/source/IOHIDFamily/IOHIDFamily-1035.1.4/IOHIDSystem/IOKit/hidsystem/IOHIDShared.h.auto.html) or see my annotated version in [`data/evg.c`](https://github.com/Siguza/IOHIDeous/tree/master/data/evg.c).
 -   Private driver memory.  
     As far as I can see, this remains unused and has a size of 0 bytes.
 
@@ -150,7 +150,7 @@ So in order to maximise our success rate, we do the following:
 3. If the former failed, run `osascript -e 'tell application "loginwindow" to «event aevtrlgo»'`.
 4. Try spawning the desired UserClient repeatedly. Whether we succeeded in logging the user out doesn't matter at this point, we'll just wait for a manual logout/shutdown/reboot if not. So as long as the return value of `IOServiceOpen` is `kIOReturnBusy`, we keep looping.
 
-_This is implemented in [`src/hid/obtain.c`](../src/hid/obtain.c) with some parts residing in [`src/hid/main.c`](../src/hid/main.c)._
+_This is implemented in [`src/hid/obtain.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/obtain.c) with some parts residing in [`src/hid/main.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/main.c)._
 
 ### Triggering the bug
 
@@ -167,7 +167,7 @@ In conclusion:
 - In one thread, we just spam a value to `eop->evGlobalsOffset`.
 - In another thread, we call the initialisation routine until `evg->version == 0`.
 
-_This is implemented in [`src/hid/exploit.c`](../src/hid/exploit.c). A minimal standalone implementation also exists in [`src/poc/main.c`](../src/poc/main.c)._
+_This is implemented in [`src/hid/exploit.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/exploit.c). A minimal standalone implementation also exists in [`src/poc/main.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/poc/main.c)._
 
 ### Shmem basics
 
@@ -259,7 +259,7 @@ Now that address looks like it could well be in range of our shared memory! I've
     ffffff820383d000    ffffff81b6a48000    ffffff81d6a48000    000000004cdf5000    000000002cdf5000
     ffffff81efedd000    ffffff81a30df000    ffffff81c30df000    000000004cdfe000    000000002cdfe000
 
-Nice, all differences are less than the 2GB we can offset! (Note that the kalloc addresses are lower than the shmem ones, so 1. the differences are negative and 2. we're really lucky to have our offset value `signed`. :P) I've done the same statistics on Sierra as well (see [`data/shmem.txt`](../data/shmem.txt)), but there all differences are larger than 64GB (as is to be expected). So on High Sierra we'll go for the `kalloc_map`.
+Nice, all differences are less than the 2GB we can offset! (Note that the kalloc addresses are lower than the shmem ones, so 1. the differences are negative and 2. we're really lucky to have our offset value `signed`. :P) I've done the same statistics on Sierra as well (see [`data/shmem.txt`](https://github.com/Siguza/IOHIDeous/tree/master/data/shmem.txt)), but there all differences are larger than 64GB (as is to be expected). So on High Sierra we'll go for the `kalloc_map`.
 
 Now that we have our targets set, we can look at how to maximise the chance of landing in a structure sprayed by us. On both maps, allocations usually happen at the lowest possible address, so the higher an address, the less likely it should be to have been previously allocated, i.e. the more likely it should be to be allocated by us.
 
@@ -279,8 +279,8 @@ And for High Sierra/the `kalloc_map`:
 Notes:
 
 - `sysctlbyname("hw.memsize")` reveals the system memory size, from which the size of the `kalloc_map` can be derived. 
-- The value `-0x30000000` is quite arbitrary. In order to land inside the `kalloc_map`, we need a negative offset that is larger than the biggest possible difference between the end of the `kalloc_map` and the beginning of our shared memory, but which is also smaller than the smallest possible difference between the _beginning_ of the `kalloc_map` and the beginning of our shared memory. Ideally it should also be as small as possible, so that we land closer to the end of the map. With biggest and smallest observed differences being `-0x2cdfe000` and `-0x399ad000`, I have chosen `-0x30000000` as a conservative guess. It is most likely possible to derive a more fitting value based on the actual memory size (which seems to affect the differences) by doing a lot more statistics, but I eventually grew tired of rebooting, and `-0x30000000` works just fine for me - you can change `KALLOC_OFFSET_AMOUNT` in [`src/hid/config.h`](../src/hid/config.h) if you like a different value better.
-- Making 2GB worth of allocations takes well over 10 minutes on my machine, which is longer than I like to wait. I have found that allocating just 768MB and offsetting by a little bit less than that still worked every time for me though. I have added both configurations to [`src/hid/config.h`](../src/hid/config.h) with 768MB being the default, and 2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
+- The value `-0x30000000` is quite arbitrary. In order to land inside the `kalloc_map`, we need a negative offset that is larger than the biggest possible difference between the end of the `kalloc_map` and the beginning of our shared memory, but which is also smaller than the smallest possible difference between the _beginning_ of the `kalloc_map` and the beginning of our shared memory. Ideally it should also be as small as possible, so that we land closer to the end of the map. With biggest and smallest observed differences being `-0x2cdfe000` and `-0x399ad000`, I have chosen `-0x30000000` as a conservative guess. It is most likely possible to derive a more fitting value based on the actual memory size (which seems to affect the differences) by doing a lot more statistics, but I eventually grew tired of rebooting, and `-0x30000000` works just fine for me - you can change `KALLOC_OFFSET_AMOUNT` in [`src/hid/config.h`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/config.h) if you like a different value better.
+- Making 2GB worth of allocations takes well over 10 minutes on my machine, which is longer than I like to wait. I have found that allocating just 768MB and offsetting by a little bit less than that still worked every time for me though. I have added both configurations to [`src/hid/config.h`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/config.h) with 768MB being the default, and 2GB being selectable through a `-DPLAY_IT_SAFE` compiler flag.
 
 ### Reading and writing memory
 
@@ -309,7 +309,7 @@ So writing 4 bytes is a simple as:
 
 And we have our 4 bytes copied. (Note that `shmem_addr` is used as source rather than `evg`, so we cannot copy anything other than the true `eventFlags`.) Of course the other few dozen kilobytes of memory belonging to the structure are quite a an obstacle if we want to rewrite pointers, as they threaten to lay waste to everything in the vicinity. It turns out that there are quite a lot of gaps though which are left untouched by initialisation and if special care is taken, this method can actually suffice. (Note that the call to `bzero` in `initShmem` also uses `shmem_addr` as argument rather than `evg`, so it does no harm either to the memory we offset to.)
 
-_This is implemented in [`src/hid/exploit.c`](../src/hid/exploit.c)._
+_This is implemented in [`src/hid/exploit.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/exploit.c)._
 
 For reading memory it is kind of a fundamental requirement though that we don't destroy the target structure, and the same could also still prove very useful for writing. With initialisation pretty much out of our control, the only way we can achieve this is if the initialisation of the target memory happens _after_ the initialisation and offsetting of our shared memory. In most cases this means we have to reallocate the target objects after offsetting `evg`, but we could also have a buffer that is (re-)filled long after its allocation. The general idea is:
 
@@ -409,7 +409,7 @@ IOReturn IOHIDSystem::setProperties(OSObject * properties)
         | NX_DEVICELCTLKEYMASK | NX_DEVICERCTLKEYMASK)
 ```
 
-I've created a separate program in [`data/flags.c`](../data/flags.c) to print that constant, which gave me a value of `0x01ff20ff`. That looks too restrictive to actually _write_ arbitrary pointers or data, but considering the fact that `evg->eventFlags & ~KEYBOARD_FLAGSMASK` is retained, it might just be enough to _modify_ something existing in a useful way.
+I've created a separate program in [`data/flags.c`](https://github.com/Siguza/IOHIDeous/tree/master/data/flags.c) to print that constant, which gave me a value of `0x01ff20ff`. That looks too restrictive to actually _write_ arbitrary pointers or data, but considering the fact that `evg->eventFlags & ~KEYBOARD_FLAGSMASK` is retained, it might just be enough to _modify_ something existing in a useful way.
 
 Now onto reading! This one is a fair bit trickier because most code that reads from `evg` either doesn't export that data elsewhere (which makes sense, since the client should have access to it through shared memory already), or it is ridiculously hard to trigger. For example, a call to `evDispatch` can cause the upper 24 bits of each the `x` and `y` components of `evg->screenCursorFixed` to be copied to the shared memory of an `IOFramebuffer`. That shared memory is readily accessible to us through the `IOFramebufferSharedUserClient`, however in order for the values to actually be copied there, the frame buffer need to have been previously attached to `IOHIDSystem` via a call to `IOHIDUserClient::connectClient`, `evg->frame` (which we don't control) has to be between `0` and `3` (inclusive), the cursor has to be on the screen represented by the `IOFramebuffer`, and `evDispatch` actually has to be called. All in all, hardly ideal.
 
@@ -747,9 +747,11 @@ So in review, we:
 
 At that point we could also attach a `vm_map_t` (say, the `kernel_map`) to our fake task to gain full r/w, or swap the fake task out for a fake `IOService` object with a custom vtable, allowing us to call arbitrary kernel code. I'm gonna leave it at leakage of the kernel slide here though.
 
-_This is implemented in [`src/leak/main.c`](../src/leak/main.c)._
+_This is implemented in [`src/leak/main.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/leak/main.c)._
 
 ### Leaking the kernel slide, the cheater's way
+
+_Edit: The technique explained below has for some reason stopped working on macOS High Sierra 10.13.2. I don't know why and I didn't bother to investigate, but the IOHIDFamily vulnerability is still there all the same. So while the `hid` binary in its current state will only work up to 10.13.1, you could just patch together `hid` and `leak` to get everything working on 10.13.2 - or even write a mach-port-based exploit out of `leak`, I hear mach ports are the real deal. :P_
 
 The above is nice and all (and was actually super fun to piece together), but it has a slight drawback: scanning all these `OSString`s to find out where `evg` landed takes a significant amount of time to execute, and that is after getting the `IOHIDUserClient` port. In a real attack scenario, that would mean that if we run on a logout, the user would be confronted with a black screen for quite a bit longer than they'd expect and be comfortable with, and if we run on a shutdown/reboot, we might even get killed before we get our work done (this depends on physical memory size, and is also less likely when targeting the `kalloc_map` but more likely with the `kernel_map`). On top of that, the above way to leak the slide was chronologically the last part of the exploit I wrote. For those reasons we're gonna look at another way to leak the kernel slide, one that can be executed independently of any other part of the exploit: hardware vulnerabilities!
 
@@ -768,7 +770,7 @@ Interestingly enough, no implementation I found on the web seemed to work for me
 
 For eviction I use the L3 cache rather than just the L2, because then misses will have to go to main memory, which leaves a much bigger mark in the time difference (there's also a notable difference when evicting L2, it's just a lot smaller). The most efficient way (I know of) to do that is to allocate a memory block as large as the L3 cache, divide it into parts as large as the cache line size, and do a single memory read on each of those parts. Conveniently, there are two `sysctl` entries `hw.cachelinesize` and `hw.l3cachesize` giving us exactly those sizes.
 
-Now in order to find the kernel base, we just start at address `0xffffff8000000000`, go up to `0xffffff8020000000` in steps of `0x100000` bytes, perform 16 timings at each step and throw in a `sched_yield()` before each timing to minimise external interference. I implemented that in [`data/kaslr.c`](../data/kaslr.c), and running it yields the following:
+Now in order to find the kernel base, we just start at address `0xffffff8000000000`, go up to `0xffffff8020000000` in steps of `0x100000` bytes, perform 16 timings at each step and throw in a `sched_yield()` before each timing to minimise external interference. I implemented that in [`data/kaslr.c`](https://github.com/Siguza/IOHIDeous/tree/master/data/kaslr.c), and running it yields the following:
 
     0xffffff8000000000     32    452     32     32     32     32     32     32     32     32    116     31     28     28     28     31
     0xffffff8000100000    558    232    235    468    232    332    499    335    242    301    239    291    874    369    343    286
@@ -1290,7 +1292,7 @@ Here the kernel base is `0xffffff800f200000`, and the difference of timings befo
 3. If that value is below `50`, treat the address as mapped, otherwise treat it as unmapped.
 4. Find the first block of mapped addresses large enough to contain the kernel's `__TEXT` segment.
 
-_This is implemented in [`src/hid/kaslr.c`](../src/hid/kaslr.c)._
+_This is implemented in [`src/hid/kaslr.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/kaslr.c)._
 
 Despite the authors of the paper stating that their attack works also in virtualised environments, I observed timings for mapped and unmapped pages to be indistinguishable on a High Sierra installation running inside VirtualBox (and that's the only VM I tried). But whatever, I've already shown that my bug can leak the kernel slide too if need be. :P
 
@@ -1396,7 +1398,7 @@ This additionally gives us readonly access to _all_ of `_hibernateStats`, which 
 
 The address of `_hibernateStats` is pretty evidently `0xffffff8000b10bc8` in this case.
 
-So we just made 16 bytes of writeable kernel memory whose address we can derive. At this point, let's get back to the problem we put aside earlier of how we fix the corruption of adjacent pointers when offsetting `evg`: the original pointer we're corrupting has the value `kOSBooleanTrue`, which is a location inside the `zone_map`. And the value we wanna rewrite it to is `&_hibernateStats`, which is somewhere in the kernel's `__DATA` segment. What's interesting about those two is that they aren't so far apart - the main kernel binary always resides somewhere between `0xffffff8000000000` and `0xffffff8020000000`, the `zone_map` starts at values usually lower than `0xffffff8040000000`, and since `kOSBooleanTrue` is allocated very early on, it's exceedingly likely to not be too far off from the beginning of the `zone_map`. Effectively, the addresses `kOSBooleanTrue` and `&_hibernateStats` will have the same top 32 bits, namely `0xffffff80`! For us, that means we only have to rewrite the lower 32 bits, which reduces the amount of memory we corrupt. So what memory _do_ we corrupt, exactly? We're dealing with entire page sizes, and the only thing `evg` has beyond the first page is `lleq`. Now, I've created another little program in [`data/align.c`](../data/align.c) that models five pages (all but the first) each holding a pointer in the first 8 bytes, and which simulates how the initialisation of `lleq` intersects with each of these pointers. It takes a single signed int as command line argument, which is the amount of 4-byte-blocks by which `evg` is to be shifted up or down. The output is displayed as a list of all addresses where `lleq` initialisation happens, which could possibly intersect with a pointer. If intersection does indeed occur, the specific address is coloured red. Example:
+So we just made 16 bytes of writeable kernel memory whose address we can derive. At this point, let's get back to the problem we put aside earlier of how we fix the corruption of adjacent pointers when offsetting `evg`: the original pointer we're corrupting has the value `kOSBooleanTrue`, which is a location inside the `zone_map`. And the value we wanna rewrite it to is `&_hibernateStats`, which is somewhere in the kernel's `__DATA` segment. What's interesting about those two is that they aren't so far apart - the main kernel binary always resides somewhere between `0xffffff8000000000` and `0xffffff8020000000`, the `zone_map` starts at values usually lower than `0xffffff8040000000`, and since `kOSBooleanTrue` is allocated very early on, it's exceedingly likely to not be too far off from the beginning of the `zone_map`. Effectively, the addresses `kOSBooleanTrue` and `&_hibernateStats` will have the same top 32 bits, namely `0xffffff80`! For us, that means we only have to rewrite the lower 32 bits, which reduces the amount of memory we corrupt. So what memory _do_ we corrupt, exactly? We're dealing with entire page sizes, and the only thing `evg` has beyond the first page is `lleq`. Now, I've created another little program in [`data/align.c`](https://github.com/Siguza/IOHIDeous/tree/master/data/align.c) that models five pages (all but the first) each holding a pointer in the first 8 bytes, and which simulates how the initialisation of `lleq` intersects with each of these pointers. It takes a single signed int as command line argument, which is the amount of 4-byte-blocks by which `evg` is to be shifted up or down. The output is displayed as a list of all addresses where `lleq` initialisation happens, which could possibly intersect with a pointer. If intersection does indeed occur, the specific address is coloured red. Example:
 
 [![screenshot][img7]][img7]
 
@@ -1411,7 +1413,7 @@ The first method sounds rather hard to pull off, since the kernel is most likely
 The second method however gets us straight to one arbitrary gadget worth of execution, which doesn't sound so bad already. It isn't enough to run arbitrary code though, for that we kinda need a place to put a ROP chain at. Our shared memory would do nicely for that, but is a single gadget enough to get its address back to userland? At least we can do this in two steps - if we find a suitabe gadget, we can corrupt one pointer in to only leak the shmem kernel address, and then in a second step corrupt another pointer to run a full ROP chain.  
 But for now we can run exactly one gadget.
 
-_This part is implemented in [`src/hid/heap.c`](../src/hid/heap.c) and [`src/hid/main.c`](../src/hid/main.c)._
+_This part is implemented in [`src/hid/heap.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/heap.c) and [`src/hid/main.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/main.c)._
 
 ### Turning `rip` into ROP
 
@@ -1591,7 +1593,7 @@ Now, since we committed to only rewriting the lower 32 bits of a pointer with `e
 
 At long last we get `rsp` pointing to shared memory and can chain gadgets to each other like we're used to.
 
-_This is implemented in [`src/hid/main.c`](../src/hid/main.c) with a gadget finder residing in [`src/hid/rop.c`](../src/hid/rop.c)._
+_This is implemented in [`src/hid/main.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/main.c) with a gadget finder residing in [`src/hid/rop.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/rop.c)._
 
 ### Wreaking havoc
 
@@ -1631,7 +1633,7 @@ One last thing should better happen in ROP though: repairs. Remember when we ove
 
 With that, let's leave ROP be and go back to userland. We should have root now, so the first thing we do is that `setuid(0)` to update our host port, and then we use that to get the kernel task port. Now we wanna disable SIP and AMFI, and install a root shell. Being root, we could already put a SUID binary somewhere - but obviously we wanna put it in a cool place, like `/System/pwned`. The only thing stopping us from doing all that are MAC policies. A number of file ops prevent us from making changes in `/System`, and the NVRAM ops prevent us from setting adding `amfi_get_out_of_my_way=1` to `boot-args` which would disable AMFI, and from setting `csr-active-config` to `0x3ff` which would disable SIP, and which is required in order for `amfi_get_out_of_my_way` to be honoured. So let's just zero out all file-system- and nvram-related ops from all policies, and we're good to go.
 
-_This is implemented in [`src/hid/rop.c`](../src/hid/rop.c) (ROP chain), [`src/hid/main.c`](../src/hid/main.c) (kernel patches and persistence) and [`src/helper/helper.c`](../src/helper/helper.c) (root shell)._
+_This is implemented in [`src/hid/rop.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/rop.c) (ROP chain), [`src/hid/main.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/hid/main.c) (kernel patches and persistence) and [`src/helper/helper.c`](https://github.com/Siguza/IOHIDeous/tree/master/src/helper/helper.c) (root shell)._
 
 Having achieved all that, there is nothing left for us to do but print some awesome ASCII art, and exit.
 

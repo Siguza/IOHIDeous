@@ -2,7 +2,11 @@
 
 A macOS kernel exploit based on an IOHIDFamily 0day.
 
-Write-up [here](docs/index.md).
+Write-up [here](https://siguza.github.io/IOHIDeous/).
+
+### Notice
+
+The prefetch timing attack I'm using for `hid` for some reason doesn't work on High Sierra 10.13.2 anymore, and I don't feel like investigating that. Maybe patched, maybe just the consequence of a random change, I neither know nor care. The vuln is still there and my code does both info leak and kernel r/w, just not in the same binary - reason is explained in the write-up. If you want that feature, consider it an exercise for the reader.
 
 ### Usage
 
@@ -10,7 +14,7 @@ The exploit consists of three parts:
 
 - `poc` panics the kernel to demonstrate the present of a memory corruption, should work on all macOS versions.
 - `leak` leaks the kernel slide, could be adapted to other versions but as-is works only on High Sierra.
-- `hid` achieves full kernel r/w, tested only on Sierra and High Sierra, might work on earlier versions too.
+- `hid` achieves full kernel r/w, tested only on Sierra and High Sierra (up to & including 10.13.1), might work on earlier versions too.
 
 `poc` and `leak` need to be run as the user that is currently logged in via the GUI, and they log you out in order to perform the exploit. `hid` on the other hand, gives you four options for a first argument:
 
