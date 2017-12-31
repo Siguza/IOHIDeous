@@ -1649,6 +1649,8 @@ A lot has changed since my last write-up, but this was again an awesome experien
 
 A "thank you" goes out to all the people I've quoted for their work, as well as to the [radare2 project](https://github.com/radare/radare2) for their overly awesome reverse engineering toolkit.
 
+The entire project is available [on GitHub](https://github.com/Siguza/IOHIDeous/).
+
 Again, don't hesitate to shoot me questions or feedback [on Twitter][me] or via mail (`*@*.net` where `*` = `siguza`).
 
 Cheers. :)
