@@ -1,4 +1,4 @@
-_Siguza, 01. Dec 2017_
+_Siguza, 01. Dec 2017 (published 31. Dec 2017)_
 
 # IOHIDeous
 
