@@ -33,7 +33,7 @@ typedef volatile struct _evGlobals                  // kernel   user    size    
         int32_t         x;                          // rw       -          4    _cursorHelper...
         int32_t         y;                          // rw       -          4    _cursorHelper...
     };
-    unsigned int    reservedA[27];                  // -        -       24*7    -
+    unsigned int    reservedA[27];                  // -        -       27*4    -
     unsigned        reserved:25;                    // -        -               -
     unsigned        updateCursorPositionFromFixed:1;// r        -               0
     unsigned        logCursorUpdates:1;             // r        -               0
