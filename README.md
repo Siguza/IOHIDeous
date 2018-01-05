@@ -12,7 +12,7 @@ The prefetch timing attack I'm using for `hid` for some reason doesn't work on H
 
 The exploit consists of three parts:
 
-- `poc` panics the kernel to demonstrate the present of a memory corruption, should work on all macOS versions.
+- `poc` panics the kernel to demonstrate the presence of a memory corruption, should work on all macOS versions.
 - `leak` leaks the kernel slide, could be adapted to other versions but as-is works only on High Sierra.
 - `hid` achieves full kernel r/w, tested only on Sierra and High Sierra (up to & including 10.13.1), might work on earlier versions too.
 
