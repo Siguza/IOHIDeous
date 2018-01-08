@@ -124,7 +124,7 @@ The fun part. :P
 
 ### Getting access
 
-Before we can do anything else, we have to look at how we can actually get access to thing we wanna play with, i.e. how we can spawn an `IOHIDUserClient` when `WindowServer` is holding the only available one.
+Before we can do anything else, we have to look at how we can actually get access to the thing we want to play with, i.e. how we can spawn an `IOHIDUserClient` when `WindowServer` is holding the only available one.
 
 The first option I implemented was to just get `WindowServer`'s task port and "steal" its client with `mach_port_extract_right`. Works like a charm, the only problem is that this requires both you to be root and SIP to be disabled.
 
@@ -141,7 +141,7 @@ First, we can try with some AppleScript trickery. `loginwindow` implements somet
 
 Now, it doesn't work quite as flawlessly as the previous method. It acts as if the user had actually chosen to log out via the GUI - which means that apps with unsaved changes can still abort the logout, or at least prompt for confirmation (an example for this is Terminal with a running command). In contrast, `launchctl` just tears down your GUI session without letting anyone say a damn thing. (Another drawback is that we cannot test the success of `aevtrlgo`, since the call returns while the confirmation popup is still active. This seems like a limitation of AppleScript.)
 
-But second, alternatively to a logout, a shutdown or reboot will do as well. This makes for an interesting possibility: we could write a sleeper program and just _wait_ for conditions to become favourable - I have no access to any statistics, but I'd assume most Macs are _eventually_ shut down or rebooted manually, rather than only ever going down as the result of a panic. And if that assumption holds, then our sleeper will get the chance to run and snatch the UserClient it needs.
+But alternatively to a logout, a shutdown or reboot will do as well. This makes for an interesting possibility: we could write a sleeper program and just _wait_ for conditions to become favourable - I have no access to any statistics, but I'd assume most Macs are _eventually_ shut down or rebooted manually, rather than only ever going down as the result of a panic. And if that assumption holds, then our sleeper will get the chance to run and snatch the UserClient it needs.
 
 So in order to maximise our success rate, we do the following:
 
@@ -189,7 +189,7 @@ int main(void)
 
 From Sierra 10.12.0 all through High Sierra 10.13.1, that yields `0x5ae8`. That's also quite a lot... in other words, we can slap one monster of a memory structure an entire two gigabytes back and forth through memory (that's what inspired the name "IOHIDeous").
 
-Now, a priori we know neither where this structure resides, nor where any other kernel memory lies in respect to it. So far we only know that it is allocated via an `IOBufferMemoryDescriptor`, which for `kIOMemoryKernelUserShared` goes through `iopa_alloc`, and subsequently maps the memory into the provided task, if any - in this case the `kernel_task`, so the mapping ends up on the `kernel_map`. Knowing its sharing type and (rounded) size, we can easily find it with `kmap`:
+Now, a priori we know neither where this structure resides, nor where any other kernel memory lies in respect to it. So far we only know that it is allocated via an `IOBufferMemoryDescriptor`, which for `kIOMemoryKernelUserShared` goes through `iopa_alloc`, and subsequently maps the memory into the provided task, if any. In this case this is the `kernel_task`, so the mapping ends up on the `kernel_map`. Knowing its sharing type and (rounded) size, we can easily find it with `kmap`:
 
     bash$ sudo kmap -e | fgrep 24K | fgrep 'mem tru'
     ffffff8209855000-ffffff820985b000     [  24K] -rw-/-rwx [mem tru cp] 0000000000000000 [0 0 0 0 0] 00000031/823e0c11:<         4> 0,0 {         6,         6} (dynamic)
@@ -249,7 +249,7 @@ Now that address looks like it could well be in range of our shared memory! I've
     ffffff812a681000    ffffff80f0cd4000    ffffff8100cd4000    00000000399ad000    00000000299ad000
     ffffff8116089000    ffffff80dc695000    ffffff80ec695000    00000000399f4000    00000000299f4000
     ffffff8119735000    ffffff80dfd24000    ffffff80efd24000    0000000039a11000    0000000029a11000
-
+    
     10.13 16G
     shmem               kalloc start        kalloc end          start diff          end diff
     ffffff82096c0000    ffffff81bc97c000    ffffff81dc97c000    000000004cd44000    000000002cd44000
@@ -339,7 +339,7 @@ And a note regarding `IOSurface` properties: the exported API only supports CF o
 
 -   External method `0`.  
     This creates a new `IOSurface`. As struct input it takes serialised plist properties that specify the surface's attributes (same as what you'd pass to `IOSurfaceCreate`) and as struct output it returns some data of which I only know that it contains an identifier at offset `0x10`. The kernel declares this output as having a max size of `0x6c8` bytes, so I just use this construct:
-    
+
     ```c
     union
     {
@@ -351,7 +351,7 @@ And a note regarding `IOSurface` properties: the exported API only supports CF o
         } data;
     } surface;
     ```
-    
+
     Whether that field is truly the surface's ID I don't know, but we have to pass that value to other functions later in order to specify the surface we wanna operate on.
 -   External method `9`.  
     This attaches a single property with a name to a surface. As struct input it takes serialised plist data, except that they're prefixed with an 8-byte header where the first 4 bytes are the "ID" from above, and the remaining 4 bytes are likely just padding. The property and its name are expected to be contained in a top-level array, with the property being at index `0` and the name at index `1`. It has a 4-byte struct output, but I have no idea what that is.
@@ -1667,23 +1667,23 @@ Cheers. :)
 
 <!-- link references -->
 
-  [hsp4]: https://github.com/Siguza/hsp4
-  [p0blog]: https://googleprojectzero.blogspot.com/2017/04/exception-oriented-exploitation-on-ios.html
-  [yalu102]: https://github.com/kpwn/yalu102
-  [phoenix]: http://newosxbook.com/files/PhJB.pdf
-  [phnonce]: https://github.com/Siguza/PhoenixNonce
-  [me]: https://twitter.com/s1guza
-  [qwerty]: https://twitter.com/qwertyoruiopz
-  [tihm]: https://twitter.com/tihmstar
-  [benjamin]: https://twitter.com/____benjamin
-  [prefetch]: https://gruss.cc/files/prefetch.pdf
-  [trident]: https://github.com/benjamin-42/Trident
-  [img1]: assets/img/1-structs.svg
-  [img2]: assets/img/2-overlay.svg
-  [img3]: assets/img/3-overlay.svg
-  [img4]: assets/img/4-evg.svg
-  [img5]: assets/img/5-lleq.svg
-  [img6]: assets/img/6-zero.svg
-  [img7]: assets/img/7-align.png
-  [img8]: assets/img/8-align.png
-  [img9]: assets/img/9-iohideous.png
+[hsp4]: https://github.com/Siguza/hsp4
+[p0blog]: https://googleprojectzero.blogspot.com/2017/04/exception-oriented-exploitation-on-ios.html
+[yalu102]: https://github.com/kpwn/yalu102
+[phoenix]: http://newosxbook.com/files/PhJB.pdf
+[phnonce]: https://github.com/Siguza/PhoenixNonce
+[me]: https://twitter.com/s1guza
+[qwerty]: https://twitter.com/qwertyoruiopz
+[tihm]: https://twitter.com/tihmstar
+[benjamin]: https://twitter.com/____benjamin
+[prefetch]: https://gruss.cc/files/prefetch.pdf
+[trident]: https://github.com/benjamin-42/Trident
+[img1]: assets/img/1-structs.svg
+[img2]: assets/img/2-overlay.svg
+[img3]: assets/img/3-overlay.svg
+[img4]: assets/img/4-evg.svg
+[img5]: assets/img/5-lleq.svg
+[img6]: assets/img/6-zero.svg
+[img7]: assets/img/7-align.png
+[img8]: assets/img/8-align.png
+[img9]: assets/img/9-iohideous.png
