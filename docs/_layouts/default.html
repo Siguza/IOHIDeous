@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="{{ site.lang | default: "en-US" }}">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% seo %}
+    <link rel="stylesheet" href="{{ "/assets/css/style.css?v=" | append: site.github.build_revision | relative_url }}">
+  </head>
+  <body>
+    <div class="container-lg px-3 my-5 markdown-body">
+      <nav class="separator">[ <a href="https://siguza.net">Home</a> | <a href="https://blog.siguza.net">Blog</a> | <a href="https://github.com/Siguza">GitHub</a> | <a href="https://twitter.com/s1guza">Twitter</a> ]</nav>
+      <main>
+        {{ content }}
+      </main>
+    </div>
+  </body>
+</html>
