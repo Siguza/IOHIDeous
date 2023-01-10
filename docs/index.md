@@ -21,7 +21,7 @@ The exploit accompanying this write-up consists of three parts:
 
 Note: The `ioprint` and `ioscan` utilities I'm using in this write-up are available from my [iokit-utils](https://github.com/Siguza/iokit-utils) repository. I'm also using my [hsp4 kext][hsp4] along with [kern-utils](https://github.com/Siguza/ios-kern-utils) to inspect kernel memory.
 
-For any kind of questions or feedback, feel free to hit me up on [Twitter][me] or via mail (`*@*.net` where `*` = `siguza`).
+For any kind of questions or feedback, feel free to hit me up on ~~Twitter~~ [Mastodon][me] or via mail (`*@*.net` where `*` = `siguza`).
 
 ## Technical background
 
@@ -1651,7 +1651,7 @@ A "thank you" goes out to all the people I've quoted for their work, as well as 
 
 The entire project is available [on GitHub](https://github.com/Siguza/IOHIDeous/).
 
-Again, don't hesitate to shoot me questions or feedback [on Twitter][me] or via mail (`*@*.net` where `*` = `siguza`).
+Again, don't hesitate to shoot me questions or feedback on ~~Twitter~~ [Mastodon][me] or via mail (`*@*.net` where `*` = `siguza`).
 
 Cheers. :)
 
@@ -1672,7 +1672,7 @@ Cheers. :)
   [yalu102]: https://github.com/kpwn/yalu102
   [phoenix]: http://newosxbook.com/files/PhJB.pdf
   [phnonce]: https://github.com/Siguza/PhoenixNonce
-  [me]: https://twitter.com/s1guza
+  [me]: https://mastodon.social/@siguza
   [qwerty]: https://twitter.com/qwertyoruiopz
   [tihm]: https://twitter.com/tihmstar
   [benjamin]: https://twitter.com/____benjamin
